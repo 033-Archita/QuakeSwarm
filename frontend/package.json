@@ -1,0 +1,28 @@
+{
+  "name": "quakeswarm-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "leaflet": "1.9.4",
+    "plotly.js-basic-dist-min": "4.1.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-globe.gl": "2.38.0",
+    "react-leaflet": "5.0.0",
+    "react-plotly.js": "4.1.0",
+    "react-router-dom": "6.30.6"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.2",
+    "vite": "8.3.5"
+  }
+}
