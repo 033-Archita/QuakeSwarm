@@ -4,10 +4,14 @@ from datetime import datetime, timedelta, timezone
 import math
 
 try:  # Support both package imports from the project root and direct backend execution.
-    from .config import BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_RUNS, BENCHMARK_START
+    from .config import (BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_REGIONAL_BOX,
+                         BENCHMARK_REGIONAL_END, BENCHMARK_REGIONAL_START,
+                         BENCHMARK_RUNS, BENCHMARK_START)
     from .db import get_db
 except ImportError:
-    from config import BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_RUNS, BENCHMARK_START
+    from config import (BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_REGIONAL_BOX,
+                        BENCHMARK_REGIONAL_END, BENCHMARK_REGIONAL_START,
+                        BENCHMARK_RUNS, BENCHMARK_START)
     from db import get_db
 
 
@@ -203,25 +207,75 @@ def inter_event_times(start=None, end=None, kind=None):
 
 
 def benchmark(min_lon=None, min_lat=None, max_lon=None, max_lat=None, start=None, end=None, runs=BENCHMARK_RUNS):
+    """Measure three MongoDB access paths against focused and global filters.
+
+    Timings include consuming each cursor, so they represent a complete query
+    read on this client. Explain statistics are collected separately from the
+    same filter, projection, and hint for each plan.
+    """
     from time import perf_counter
-    from pymongo import ASCENDING
-    db = get_db(); box = [min_lon, min_lat, max_lon, max_lat] if min_lon is not None else BENCHMARK_BOX
-    start = start or BENCHMARK_START; end = end or BENCHMARK_END
-    query = {"location": {"$geoWithin": {"$box": [[box[0], box[1]], [box[2], box[3]]] }}, "time": _date_range(start, end)}
-    output = {}
-    for name, hint, explain_hint in (
-        ("indexed", [("location", "2dsphere")], {"location": "2dsphere"}),
-        ("collection_scan", [("$natural", 1)], {"$natural": 1}),
-    ):
-        # Warm the same query path once; exclude this run from the measurements.
-        list(db.events.find(query).hint(hint).limit(1000000))
-        timings = []
-        for _ in range(runs):
-            t0 = perf_counter(); list(db.events.find(query).hint(hint).limit(1000000)); timings.append((perf_counter() - t0) * 1000)
-        explain = db.command("explain", {"find": "events", "filter": query, "hint": explain_hint}, verbosity="executionStats")
-        exp = explain["executionStats"]
-        output[name] = {"average_ms": sum(timings) / len(timings), "runs_ms": timings,
-                        "docs_examined": exp["totalDocsExamined"], "docs_returned": exp["nReturned"]}
-    output["count"] = output["indexed"]["docs_returned"]
-    print(f"Benchmark matched events: {output['count']}")
+
+    if runs < 1:
+        raise ValueError("runs must be at least 1")
+
+    db = get_db()
+    regional_box = [min_lon, min_lat, max_lon, max_lat] if min_lon is not None else BENCHMARK_REGIONAL_BOX
+    regional_start = start or BENCHMARK_REGIONAL_START
+    regional_end = end or BENCHMARK_REGIONAL_END
+    total_events = db.events.count_documents({})
+
+    cases = (
+        ("regional", "Small regional sample", regional_box, regional_start, regional_end),
+        ("global", "Original global query", BENCHMARK_BOX, BENCHMARK_START, BENCHMARK_END),
+    )
+    plans = (
+        ("2dsphere", "location_2dsphere"),
+        ("time_index", "time_1"),
+        ("collection_scan", {"$natural": 1}),
+    )
+    projection = {"_id": 1}
+    output = {"total_events": total_events, "runs": runs, "cases": {}}
+
+    for case_key, label, box, case_start, case_end in cases:
+        query = {
+            "location": {"$geoWithin": {"$box": [[box[0], box[1]], [box[2], box[3]]] }},
+            "time": _date_range(case_start, case_end),
+        }
+        case_result = {
+            "label": label,
+            "box": box,
+            "start": case_start,
+            "end": case_end,
+            "plans": {},
+        }
+        for plan_key, hint in plans:
+            def consume_query():
+                return sum(1 for _ in db.events.find(query, projection).hint(hint))
+
+            # Warm each case/plan once, then time the configured number of full cursor reads.
+            consume_query()
+            timings = []
+            for _ in range(runs):
+                started = perf_counter()
+                consume_query()
+                timings.append((perf_counter() - started) * 1000)
+
+            explain = db.command(
+                "explain",
+                {"find": "events", "filter": query, "projection": projection, "hint": hint},
+                verbosity="executionStats",
+            )
+            stats = explain["executionStats"]
+            case_result["plans"][plan_key] = {
+                "average_ms": sum(timings) / len(timings),
+                "runs_ms": timings,
+                "docs_examined": stats["totalDocsExamined"],
+                "docs_returned": stats["nReturned"],
+            }
+
+        case_result["returned_count"] = case_result["plans"]["2dsphere"]["docs_returned"]
+        case_result["catalog_percent"] = (case_result["returned_count"] / total_events * 100) if total_events else None
+        output["cases"][case_key] = case_result
+        print(f"Benchmark {label}: {case_result['returned_count']} returned")
+
     return output

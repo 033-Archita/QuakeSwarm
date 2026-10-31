@@ -53,10 +53,15 @@ MIN_EVENTS: int = 20
 MAG_GAP_THRESHOLD: float = 1.2
 
 # ── Benchmarking defaults ────────────────────────────────────────────
-# Bounding box [minLon, minLat, maxLon, maxLat] — global by default.
-BENCHMARK_BOX: list = [-180, -90, 180, 90]
+# The focused query is a one-year southern California sample; it returned
+# well below 5% of this project's full catalog when selected. Coordinates
+# are [minLon, minLat, maxLon, maxLat].
+BENCHMARK_REGIONAL_BOX: list = [-120, 32, -115, 36]
+BENCHMARK_REGIONAL_START: str = "2024-01-01"
+BENCHMARK_REGIONAL_END: str = "2024-12-31"
 
-# Date range and repetition count used for timing benchmarks.
+# Preserve the original global comparison as a separate case.
+BENCHMARK_BOX: list = [-180, -90, 180, 90]
 BENCHMARK_START: str = "2020-01-01"
 BENCHMARK_END: str = "2023-12-31"
 BENCHMARK_RUNS: int = 5

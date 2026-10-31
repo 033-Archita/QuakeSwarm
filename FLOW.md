@@ -1,4 +1,4 @@
-# QuakeSwarm execution flow (Phases 1–3)
+# QuakeSwarm execution flow (Phases 1–4)
 
 This file documents the current code paths for ingestion, detection, API, and the frontend pages. Analytics is split across activity, cluster, and structure routes; About / Info combines the swarm guide and MongoDB explanation. Globe Lab is intentionally isolated in one lazy-loaded page module.
 
@@ -41,25 +41,25 @@ Routes in `backend/main.py` validate query inputs and call same-purpose helpers 
 | `GET /api/analytics/swarm-timeline` | `swarm_timeline()` | `db_queries.swarm_timeline()` groups swarm starts by period and kind |
 | `GET /api/analytics/swarm-radius` | `swarm_radius()` | `db_queries.swarm_radius()` buckets stored radii in 10 km groups |
 | `GET /api/analytics/inter-event-times` | `inter_event_times()` | `db_queries.inter_event_times()` loads each cluster's event times and counts gaps in hour bins |
-| `GET /api/benchmark` | `benchmark()` | `db_queries.benchmark()` compares a 2dsphere-hinted query to `$natural` and reads `executionStats` |
+| `GET /api/benchmark` | `benchmark()` | `db_queries.benchmark()` runs regional and global queries under 2dsphere, time-index, and `$natural` hints; timings come from cursor reads and document counts from `executionStats` |
 
 The API validates date order, bounding boxes, enum parameters and limits. FastAPI returns HTTP 422 for invalid typed/range parameters. Missing swarm IDs return 404.
 
 ## E. Frontend flow
 
-`frontend/index.html` loads `frontend/src/main.jsx`, which imports Leaflet CSS and the shared styles, then mounts `App` inside `BrowserRouter`. `App` checks `/api/health` through `apiRequest()` and provides shared navigation. Analytics, Swarm Explorer, Why MongoDB, About Swarms, and Globe Lab are loaded with `React.lazy`. `api.js` is the shared API/static-asset request module and `useApiResource.js` provides abortable loading/error/retry state for query-backed views.
+`frontend/index.html` loads `frontend/src/main.jsx`, which imports Leaflet CSS and the shared styles, then mounts `App` inside `BrowserRouter`. `App` checks `/api/health` through `apiRequest()` and provides shared navigation. Analytics, Swarm Explorer, About / Info, and Globe Lab are loaded with `React.lazy`. `/analytics` redirects to `/analytics/activity`; the three Analytics subsections are separate routes. About / Info (`AboutInfo.jsx`) switches between `AboutSwarms.jsx` and `WhyMongoDB.jsx`; old `/mongodb` and `/about-swarms` URLs redirect to `/about`. `api.js` is the shared API/static-asset request module and `useApiResource.js` provides abortable loading/error/retry state for query-backed views.
 
 Overview requests `/api/stats` first. It derives the default date window from `last_event_time` (one year back through the last stored event date), then calls `/api/events` with `min_mag=4.5`, `sort=mag_desc`, and `limit=2000`, and `/api/timeline?granularity=month` with the same dates and magnitude. Date and magnitude controls refetch the relevant data. The Earthquakes/Swarms toggle requests `/api/events` or `/api/swarms`; no whole event collection is sent to the browser.
 
 `components/EventMap.jsx` renders Leaflet tiles, magnitude-sized earthquake circles, swarm circles, and diamond markers for mainshock sequences. Clicking a swarm requests `/api/swarms/{id}`; the response fills detail and overlays member events. `components/ActivityChart.jsx` is lazy-loaded after monthly data is available and uses the Plotly basic bundle and `plotTheme.js`.
 
-`pages/SwarmExplorer.jsx` requests `/api/swarms` with kind/date/minimum-event/sort filters. It loads `/countries.json` through `api.js`, then `geography.js` assigns each cluster centroid to a Natural Earth country and continent. Country, continent, maximum-event-count, magnitude, and duration filters are applied locally. The catalog is shown as paginated cards. Selecting a card opens `/api/swarms/{id}`; returned events supply the regional Leaflet map, magnitude-time scatter, daily-count chart, and chronological table. `pages/Analytics.jsx` renders charts 1–7 from event analytics routes and charts 8–12 from swarm analytics routes. It groups date/magnitude filters for earthquake activity and date/kind filters for swarm results and structure. All date controls are bounded to 2015-01-01 through 2025-12-31 and magnitude controls start at M 2.5. `pages/WhyMongoDB.jsx` reads actual collection indexes from `/api/indexes`; its button calls `/api/benchmark` and displays returned timing and execution statistics. `pages/AboutSwarms.jsx` explains the configured catalog and detection thresholds. `StateMessage.jsx` renders loading, error/retry, and unavailable states with context-specific messages.
+`pages/SwarmExplorer.jsx` requests `/api/swarms` with kind/date/minimum-event/sort filters. It loads `/countries.json` through `api.js`, then `geography.js` assigns each cluster centroid to a Natural Earth country and continent. Country, continent, maximum-event-count, magnitude, and duration filters are applied locally. The catalog is shown as paginated cards. Selecting a card opens `/api/swarms/{id}`; returned events supply the regional Leaflet map, magnitude-time scatter, daily-count chart, and chronological table. `pages/Analytics.jsx` renders charts 1–7 from event analytics routes and charts 8–12 from swarm analytics routes. Activity, cluster results, and structure use separate routes and separate filter state; each date/magnitude or date/kind filter only controls its own section. All date controls are bounded to 2015-01-01 through 2025-12-31 and magnitude controls start at M 2.5. `pages/WhyMongoDB.jsx` reads actual collection indexes from `/api/indexes`; its button calls `/api/benchmark` and displays both measured cases and all three plans. `pages/AboutSwarms.jsx` explains the configured catalog and detection thresholds. `StateMessage.jsx` renders loading, error/retry, and unavailable states with context-specific messages.
 
 `pages/GlobeLab.jsx` is the only file importing `react-globe.gl`. It requests `/api/events` with a limit of 800 and `/api/swarms`, displaying up to 200 cluster centers for a 1,000 marker maximum. Its click panel sits beside the globe at desktop widths and shows earthquake or cluster fields from those records. The initial camera points toward North America; CSS brightens and softens the texture display. The page is lazy-loaded and removable with its route, nav link and dependency. `ActivityChart.jsx` plots monthly event counts as a filled line with a UTC date axis.
 
 ## F. Benchmark flow
 
-The benchmark is triggered by `GET /api/benchmark` and handled by `main.benchmark()` → `db_queries.benchmark()`. It uses the same `$geoWithin` box and time filter for each query, forces the location 2dsphere index with a hint for the indexed case and forces natural collection order for the scan case. It performs a warm-up query, collects wall-clock milliseconds for the requested repetitions, and reads `totalDocsExamined` and `nReturned` from MongoDB's `explain` command with `executionStats` verbosity. It prints and returns the indexed returned count alongside both result objects. Actual measurements require a running MongoDB database containing events.
+The benchmark is triggered by `GET /api/benchmark` and handled by `main.benchmark()` → `db_queries.benchmark()`. It uses the same `$geoWithin` `$box` and time filter for every plan. The first case defaults to `BENCHMARK_REGIONAL_BOX`, `BENCHMARK_REGIONAL_START`, and `BENCHMARK_REGIONAL_END` from `config.py`; the second preserves the original global `BENCHMARK_BOX`, `BENCHMARK_START`, and `BENCHMARK_END`. For each case, it forces the `location_2dsphere` hint, `time_1` hint, and `{'$natural': 1}` hint. Each case/plan gets one warm-up cursor consumption followed by the requested `runs` timed cursor reads. `average_ms` and `runs_ms` measure wall time for consuming matching IDs. Separate `explain` commands with `executionStats` provide `totalDocsExamined` and `nReturned`; each case returns the matched count and its share of total catalog documents. It prints the matched count per case. A hint forces a path, not a performance result. Actual measurements require a running MongoDB database containing events.
 
 ## G. Function-call mapping
 
@@ -73,9 +73,9 @@ The benchmark is triggered by `GET /api/benchmark` and handled by `main.benchmar
 - Marker selection: `EventMap.jsx → Overview.selectMarker() → apiRequest('/api/swarms/{id}') → selected detail panel + constituent-event map overlay`
 - Analytics: each `main` analytics route → corresponding `db_queries` function → MongoDB aggregation or find
 - Swarm catalog/detail: `SwarmExplorer.jsx → apiRequest('/api/swarms') → row selection → apiRequest('/api/swarms/{id}') → regional map + charts + event table`
-- Database explainer: `WhyMongoDB.jsx → apiRequest('/api/indexes')`; button → `apiRequest('/api/benchmark') → Plotly chart + execution stats`
+- Database explainer: `AboutInfo.jsx → WhyMongoDB.jsx → apiRequest('/api/indexes')`; button → `apiRequest('/api/benchmark') → regional/global charts + per-plan execution statistics`
 - Globe: `GlobeLab.jsx → apiRequest('/api/events', limit=800) + apiRequest('/api/swarms') → normalized marker objects → react-globe.gl → selected-record panel`
-- Benchmark: `main.benchmark() → db_queries.benchmark() → hinted find().explain('executionStats')`
+- Benchmark: `main.benchmark() → db_queries.benchmark() → (regional/global case) → warm-up + timed hinted find() cursor reads → hinted explain('executionStats') → timings, docs examined/returned, matched count`
 
 ## H. Relationships and data shapes
 
@@ -124,10 +124,11 @@ flowchart LR
   U[Browser] --> ROUTER[App.jsx routes]
   ROUTER --> O[Overview]
   ROUTER --> S[SwarmExplorer]
-  ROUTER --> A[Analytics]
-  ROUTER --> W[WhyMongoDB]
+  ROUTER --> A[Analytics activity / clusters / structure]
+  ROUTER --> W[AboutInfo]
   ROUTER --> G[GlobeLab]
-  ROUTER --> I[AboutSwarms]
+  W --> I[AboutSwarms tab]
+  W --> DBINFO[WhyMongoDB tab]
   O --> API[api.js]
   S --> API
   A --> API
@@ -140,7 +141,7 @@ flowchart LR
 
 | Path | Responsibility |
 |---|---|
-| `backend/config.py` | MongoDB, USGS, ingestion, detection and benchmark defaults |
+| `backend/config.py` | MongoDB, USGS, ingestion, detection and regional/global benchmark defaults |
 | `backend/db.py` | Shared connection and required indexes |
 | `backend/main.py` | FastAPI startup, CORS, validation and endpoint routing |
 | `backend/db_queries.py` | Database query and aggregation functions |
@@ -152,10 +153,11 @@ flowchart LR
 | `frontend/src/components/EventMap.jsx` | Leaflet map and earthquake/swarm marker presentation |
 | `frontend/src/components/ActivityChart.jsx` | Lazy Plotly monthly activity chart |
 | `frontend/src/pages/SwarmExplorer.jsx` | Filtered cluster list, detail charts, regional map and event table |
-| `frontend/src/pages/Analytics.jsx` | Twelve charts backed by analytics API responses |
-| `frontend/src/pages/WhyMongoDB.jsx` | Live index listing and benchmark interaction/results |
+| `frontend/src/pages/Analytics.jsx` | Twelve charts across activity, cluster, and structure routes with separate filters |
+| `frontend/src/pages/AboutInfo.jsx` | About / Info tabs for the swarm guide and database explanation |
+| `frontend/src/pages/WhyMongoDB.jsx` | Live index listing and three-plan regional/global benchmark results |
 | `frontend/src/pages/GlobeLab.jsx` | Isolated lazy-loaded 3D globe and bounded markers |
-| `frontend/src/pages/AboutSwarms.jsx` | Human-readable catalog and clustering method guide |
+| `frontend/src/pages/AboutSwarms.jsx` | Human-readable catalog and clustering method guide tab |
 | `frontend/src/catalog.js` | UI catalog bounds and mirrored clustering defaults |
 | `frontend/src/geography.js` | Country/continent lookup for swarm centroid coordinates |
 | `frontend/public/countries.json` | Public-domain Natural Earth 1:110m country boundaries, fetched on the Swarm Explorer page |
@@ -166,6 +168,6 @@ flowchart LR
 | `frontend/src/plotTheme.js` | Shared Plotly colors, fonts and layout defaults |
 | `frontend/src/styles.css` | Design tokens, responsive layout and state styling |
 
-Frontend relationships: `App.jsx` routes to the page modules; Overview composes `EventMap` and `ActivityChart`; Swarm Explorer composes `RegionalSwarmMap`, `ChartPanel`, `PlotlyChart`, and `FilterBar`, with country lookup data from `geography.js`; Analytics composes `ChartPanel`, `PlotlyChart`, and `FilterBar`; Why MongoDB composes `PlotlyChart`; About Swarms reads display thresholds from `catalog.js`; Globe Lab uses `react-globe.gl` only inside its own page module. Data requests flow through `api.js` directly or through `useApiResource.js`.
+Frontend relationships: `App.jsx` routes to the page modules; Overview composes `EventMap` and `ActivityChart`; Swarm Explorer composes `RegionalSwarmMap`, `ChartPanel`, `PlotlyChart`, and `FilterBar`, with country lookup data from `geography.js`; Analytics composes `ChartPanel`, `PlotlyChart`, and `FilterBar` on three routes with separate filter state; AboutInfo switches between WhyMongoDB (which composes `PlotlyChart`) and AboutSwarms (which reads display thresholds from `catalog.js`); Globe Lab uses `react-globe.gl` only inside its own page module. Data requests flow through `api.js` directly or through `useApiResource.js`.
 
 Key event shape: `{_id, time, mag, mag_type, place, depth_km, location: {type: "Point", coordinates: [lon, lat]}, url}`. Key swarm shape: `{_id, start, end, duration_days, n_events, centroid, bbox, radius_km, max_mag, second_mag, mag_gap, kind, event_ids, label}`. `GET /api/events` maps coordinates to `lat` and `lon`; `GET /api/swarms` omits `event_ids`; the detail route includes `events` alongside the stored swarm fields.
