@@ -150,7 +150,7 @@ export default function Overview() {
     setSelectedDetail(null)
     try {
       if (layer === 'events') {
-        const result = await apiRequest('/api/events', { ...params, sort: 'mag_desc', limit: 2000 }, { signal })
+        const result = await apiRequest('/api/events', { ...params, sort: 'time_desc', limit: 2000 }, { signal })
         setEvents(result.events.filter(hasEventCoordinates))
       } else {
         const result = await apiRequest('/api/swarms', { start, end, sort: 'start_desc' }, { signal })
