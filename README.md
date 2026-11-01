@@ -24,6 +24,7 @@ QuakeSwarm downloads real earthquake events from the [USGS Earthquake Catalog](h
 - [Testing](#testing)
 - [Known limitations](#known-limitations)
 - [Possible future work](#possible-future-work)
+- [Acknowledgements](#Acknowledgements)
 
 
 ---
@@ -53,8 +54,6 @@ flowchart LR
     E --> F
     F --> G[React app: Leaflet + Plotly]
 ```
-
-For a line-by-line walkthrough of the code paths, function calls and diagrams, see [FLOW.md](FLOW.md).
 
 ## Data and method
 
@@ -221,7 +220,6 @@ All endpoints return JSON. Invalid dates, bounding boxes or query values return 
 QuakeSwarm/
 ├── main.py                  # root entry point: forwards to backend.main
 ├── README.md
-├── FLOW.md                  # code execution flow and function-call maps
 ├── backend/
 │   ├── main.py              # FastAPI routes and request validation
 │   ├── config.py            # connection, ingestion and detection settings
