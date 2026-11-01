@@ -96,13 +96,19 @@ export default function Analytics() {
 
         <ChartQuery path="/api/analytics/magnitude-types" params={earthquake} title="Magnitude types" subtitle="Null type values are labeled Not available." emptyMessage="Magnitude-type data is not available for this selection.">
           {(rows) => {
-            const tickStep = Math.max(1, Math.ceil(rows.length / 7))
-            const tickRows = rows.filter((_, index) => index % tickStep === 0)
+            const topRows = rows.slice(0, 8)
+            const remainingRows = rows.slice(8)
+            const chartRows = remainingRows.length > 0
+              ? [
+                  ...topRows,
+                  { mag_type: 'Other', count: remainingRows.reduce((total, row) => total + row.count, 0) },
+                ]
+              : topRows
             return <Plot
-              data={[{ type: 'bar', x: rows.map((row) => row.mag_type), y: rows.map((row) => row.count), marker: { color: chartColors.sage }, hovertemplate: '%{x}<br>%{y:,} events<extra></extra>' }]}
+              data={[{ type: 'bar', x: chartRows.map((row) => row.mag_type), y: chartRows.map((row) => row.count), text: chartRows.map((row) => row.count.toLocaleString()), textposition: 'outside', cliponaxis: false, marker: { color: chartColors.sage }, hovertemplate: '%{x}<br>%{y:,} events<extra></extra>' }]}
               layout={{
-                margin: { l: 48, r: 16, t: 18, b: 92 },
-                xaxis: { ...plotTheme.xaxis, title: { text: 'Magnitude type', standoff: 18 }, tickmode: 'array', tickvals: tickRows.map((row) => row.mag_type), tickangle: -40, tickfont: { size: 8 }, automargin: true },
+                margin: { l: 48, r: 16, t: 36, b: 92 },
+                xaxis: { ...plotTheme.xaxis, title: { text: 'Magnitude type', standoff: 18 }, tickmode: 'array', tickvals: chartRows.map((row) => row.mag_type), tickangle: -40, tickfont: { size: 8 }, automargin: true },
                 yaxis: { ...plotTheme.yaxis, rangemode: 'tozero', title: { text: 'Events', standoff: 12 } },
               }}
               height={325}

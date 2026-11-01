@@ -22,6 +22,45 @@ function defaultStart(lastTime) {
   return candidate < CATALOG_START ? CATALOG_START : candidate > CATALOG_END ? CATALOG_END : candidate
 }
 
+function wholeUtcMonthRange(start, end) {
+  if (!start || !end) return null
+  const firstDate = new Date(`${start}T00:00:00Z`)
+  const lastDate = new Date(`${end}T00:00:00Z`)
+  const firstMonth = new Date(Date.UTC(
+    firstDate.getUTCFullYear(),
+    firstDate.getUTCMonth() + (firstDate.getUTCDate() === 1 ? 0 : 1),
+    1,
+  ))
+  const lastDayOfMonth = new Date(Date.UTC(
+    lastDate.getUTCFullYear(),
+    lastDate.getUTCMonth() + 1,
+    0,
+  )).getUTCDate()
+  const lastMonthEnd = lastDate.getUTCDate() === lastDayOfMonth
+    ? lastDate
+    : new Date(Date.UTC(lastDate.getUTCFullYear(), lastDate.getUTCMonth(), 0))
+
+  if (firstMonth > lastMonthEnd) return null
+  return {
+    start: firstMonth.toISOString().slice(0, 10),
+    end: lastMonthEnd.toISOString().slice(0, 10),
+  }
+}
+
+function hasEventCoordinates(event) {
+  return Number.isFinite(event.lat)
+    && Number.isFinite(event.lon)
+    && Number.isFinite(event.mag)
+}
+
+function hasSwarmCoordinates(swarm) {
+  const coordinates = swarm.centroid?.coordinates
+  return Array.isArray(coordinates)
+    && coordinates.length >= 2
+    && Number.isFinite(coordinates[0])
+    && Number.isFinite(coordinates[1])
+}
+
 function DateFilter({ label, value, onChange }) {
   return <label className="filter-control"><span>{label}</span><input type="date" min={CATALOG_START} max={CATALOG_END} value={value} onChange={(event) => onChange(event.target.value)} /></label>
 }
@@ -65,6 +104,7 @@ export default function Overview() {
   }, [refresh])
 
   const params = useMemo(() => ({ start, end, min_mag: minMag }), [start, end, minMag])
+  const activityRange = useMemo(() => wholeUtcMonthRange(start, end), [start, end])
   function updateDate(field, value) {
     const current = { start, end }
     const proposed = { ...current, [field]: value }
@@ -74,18 +114,27 @@ export default function Overview() {
   }
 
   const loadActivity = useCallback(async (signal) => {
-    if (!start || !end) return
+    if (!activityRange) {
+      setActivity([])
+      setActivityError(null)
+      setActivityLoading(false)
+      return
+    }
     setActivityLoading(true)
     setActivityError(null)
     try {
-      const rows = await apiRequest('/api/timeline', { ...params, granularity: 'month' }, { signal })
+      const rows = await apiRequest('/api/timeline', {
+        ...params,
+        ...activityRange,
+        granularity: 'month',
+      }, { signal })
       setActivity(rows)
     } catch (error) {
       if (error.name !== 'AbortError') setActivityError(error.message)
     } finally {
       if (!signal.aborted) setActivityLoading(false)
     }
-  }, [end, params, start])
+  }, [activityRange, params])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -102,10 +151,10 @@ export default function Overview() {
     try {
       if (layer === 'events') {
         const result = await apiRequest('/api/events', { ...params, sort: 'mag_desc', limit: 2000 }, { signal })
-        setEvents(result.events)
+        setEvents(result.events.filter(hasEventCoordinates))
       } else {
         const result = await apiRequest('/api/swarms', { start, end, sort: 'start_desc' }, { signal })
-        setSwarms(result)
+        setSwarms(result.filter(hasSwarmCoordinates))
       }
     } catch (error) {
       if (error.name !== 'AbortError') setDataError(error.message)
@@ -137,13 +186,18 @@ export default function Overview() {
   }
 
   const eventCount = layer === 'events' ? events?.length : swarms?.length
-  const monthCount = start && end ? (new Date(`${end}T00:00:00Z`).getUTCFullYear() - new Date(`${start}T00:00:00Z`).getUTCFullYear()) * 12 + new Date(`${end}T00:00:00Z`).getUTCMonth() - new Date(`${start}T00:00:00Z`).getUTCMonth() + 1 : 12
+  const monthCount = activityRange
+    ? (new Date(`${activityRange.end}T00:00:00Z`).getUTCFullYear() - new Date(`${activityRange.start}T00:00:00Z`).getUTCFullYear()) * 12
+      + new Date(`${activityRange.end}T00:00:00Z`).getUTCMonth()
+      - new Date(`${activityRange.start}T00:00:00Z`).getUTCMonth()
+      + 1
+    : 0
 
   return (
     <main className="page-shell overview-page">
       <section className="page-heading">
         <div>
-          <p className="eyebrow">SEISMIC ACTIVITY / LIVE CATALOG</p>
+          <p className="eyebrow">SEISMIC ACTIVITY / STORED CATALOG</p>
           <h1>Earthquake overview</h1>
           <p className="heading-copy">A geographic view of recorded earthquakes and detected clusters.</p>
         </div>
@@ -190,12 +244,12 @@ export default function Overview() {
         <aside className="side-column">
           <article className="panel activity-panel">
             <div className="panel-heading"><div><p className="eyebrow">TEMPORAL SIGNAL</p><h2>Monthly activity</h2></div><span className="period-chip">{monthCount} MONTHS</span></div>
-            <p className="panel-copy">Events per month in the selected catalog window.</p>
+            <p className="panel-copy">Events in complete UTC months within the selected catalog window.</p>
             {activityError ? <StateMessage state="error" title="Activity data could not be loaded." detail={activityError} onRetry={() => setRefresh((value) => value + 1)} /> : null}
             {activityLoading ? <StateMessage state="loading" title="Loading monthly activity…" /> : null}
-            {!activityLoading && !activityError && activity?.length === 0 ? <StateMessage state="unavailable" title="Monthly activity is not available." detail="There are no events in this date and magnitude selection." /> : null}
+            {!activityLoading && !activityError && activity?.length === 0 ? <StateMessage state="unavailable" title="Monthly activity is not available." detail={activityRange ? 'There are no events in the selected complete UTC months.' : 'The selected date range contains no complete UTC months.'} /> : null}
             {activity?.length > 0 && !activityError && <Suspense fallback={<StateMessage state="loading" title="Preparing monthly activity chart…" />}><ActivityChart rows={activity} loading={activityLoading} /></Suspense>}
-            <div className="activity-foot"><span className="activity-key" /> Monthly event count <span className="activity-range">{start && end ? `${start} — ${end}` : 'Awaiting catalog dates'}</span></div>
+            <div className="activity-foot"><span className="activity-key" /> Monthly event count <span className="activity-range">{activityRange ? `${activityRange.start} — ${activityRange.end} UTC` : 'No complete UTC months'}</span></div>
           </article>
 
           <article className="panel detail-panel">

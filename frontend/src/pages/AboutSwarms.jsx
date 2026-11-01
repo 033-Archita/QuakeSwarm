@@ -17,7 +17,7 @@ export default function AboutSwarms() {
         <article className="panel about-method"><p className="eyebrow">HOW LABELS ARE ASSIGNED</p><h2>Magnitude gap and event timing</h2><p>A cluster is a <strong>mainshock sequence</strong> when its largest magnitude leads the second largest by at least {CLUSTER_MAG_GAP_THRESHOLD.toFixed(1)}. It is also a mainshock sequence when its largest event is at least M {EARLY_MAINSHOCK_MAGNITUDE.toFixed(1)} and occurs within the first {EARLY_MAINSHOCK_FRACTION * 100}% of the cluster's time span, even if the magnitude gap is smaller. Otherwise it is labeled a <strong>swarm</strong>. If the magnitude gap cannot be computed, the cluster is <strong>unclassified</strong>.</p></article>
         <article className="panel about-method"><p className="eyebrow">LIMITS TO KEEP IN MIND</p><h2>A useful view of this catalog</h2><ul><li>The output depends on the configured distance, time, size, and magnitude-gap thresholds.</li><li>Events near the edge of a cluster may be assigned differently with another parameter choice.</li><li>Catalog coverage, event locations, and magnitude estimates have uncertainty.</li><li>This analysis describes historical records; it does not provide hazard forecasts.</li></ul></article>
       </section>
-      <footer className="page-footer"><span>QUAKESWARM · METHOD GUIDE</span><span>Configuration values are read from backend/config.py.</span></footer>
+      <footer className="page-footer"><span>QUAKESWARM · METHOD GUIDE</span><span>Values shown mirror the default detection settings.</span></footer>
     </main>
   )
 }

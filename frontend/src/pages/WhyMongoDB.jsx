@@ -71,7 +71,7 @@ export default function WhyMongoDB() {
       <section className="panel index-panel">
         <div className="panel-heading">
           <div>
-            <p className="eyebrow">LIVE DATABASE METADATA</p>
+            <p className="eyebrow">CURRENT DATABASE METADATA</p>
             <h2>Indexes currently present</h2>
           </div>
           <span className="period-chip">READ FROM MONGODB</span>

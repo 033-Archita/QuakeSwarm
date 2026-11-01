@@ -1,0 +1,19 @@
+# Backend Python dependencies (pinned in backend/requirements.txt).
+-r backend/requirements.txt
+
+# Frontend dependencies are installed from frontend/package-lock.json with:
+#   cd frontend
+#   npm ci
+# Requires Node.js >= 22.12.0.
+# Runtime packages:
+#   leaflet==1.9.4
+#   plotly.js-basic-dist-min==4.1.2
+#   react==19.3.1
+#   react-dom==19.3.1
+#   react-globe.gl==2.38.0
+#   react-leaflet==5.0.0
+#   react-plotly.js==4.1.0
+#   react-router-dom==6.30.6
+# Build packages:
+#   @vitejs/plugin-react==6.1.2
+#   vite==8.3.5

@@ -3,14 +3,15 @@ import Globe from 'react-globe.gl'
 import { apiRequest } from '../api.js'
 import StateMessage from '../components/StateMessage.jsx'
 import { CATALOG_END, CATALOG_START, MAGNITUDE_FILTER_OPTIONS, MIN_CATALOG_MAGNITUDE, normalizeDateRange } from '../catalog.js'
+import { mapColors } from '../mapColors.js'
 
 const eventCap = 800
 const swarmCap = 200
 
 function magnitudeColor(magnitude) {
-  if (magnitude >= 5) return '#C75B55'
-  if (magnitude >= 3.5) return '#E58A52'
-  return '#D9B98C'
+  if (magnitude >= 5) return mapColors.red
+  if (magnitude >= 3.5) return mapColors.orange
+  return mapColors.sandstone
 }
 
 function formatTime(value) {
@@ -60,7 +61,7 @@ export default function GlobeLab() {
       if (!Array.isArray(coordinates) || coordinates.length < 2) return []
       const sequence = swarm.kind === 'mainshock_sequence'
       return [{ kind: 'swarm', lat: coordinates[1], lng: coordinates[0], radius: Math.min(0.44, 0.15 + Math.sqrt(swarm.n_events || 1) * 0.012), altitude: 0.025,
-        color: sequence ? '#C75B55' : '#526B78', label: `${sequence ? 'Mainshock sequence' : swarm.kind === 'unclassified' ? 'Unclassified cluster' : 'Swarm'} · ${swarm.label || 'Region not available'}`, source: swarm }]
+        color: sequence ? mapColors.red : mapColors.slate, label: `${sequence ? 'Mainshock sequence' : swarm.kind === 'unclassified' ? 'Unclassified cluster' : 'Swarm'} · ${swarm.label || 'Region not available'}`, source: swarm }]
     })
     return [...earthquakePoints, ...swarmPoints]
   }, [resource.events, resource.swarms])
@@ -73,7 +74,7 @@ export default function GlobeLab() {
 
   return (
     <main className="page-shell globe-page">
-      <section className="page-heading"><div><p className="eyebrow">EXPERIMENTAL / SPHERICAL VIEW</p><h1>Globe Lab</h1><p className="heading-copy">USGS earthquakes and detected cluster centroids on a rotatable 3D globe.</p></div><span className="catalog-stamp">LIMITED LIVE CATALOG · MAX 1,000 MARKERS</span></section>
+      <section className="page-heading"><div><p className="eyebrow">EXPERIMENTAL / SPHERICAL VIEW</p><h1>Globe Lab</h1><p className="heading-copy">USGS earthquakes and detected cluster centroids on a rotatable 3D globe.</p></div><span className="catalog-stamp">STORED CATALOG · MAX 1,000 MARKERS</span></section>
       <section className="panel globe-panel">
         <div className="globe-toolbar">
           <label className="filter-control"><span>START</span><input type="date" min={CATALOG_START} max={CATALOG_END} value={filters.start} onChange={(event) => setDate('start', event.target.value)} /></label>
@@ -102,7 +103,7 @@ export default function GlobeLab() {
         </div>
       </section>
       <p className="method-note"><span>TEXTURE</span> NASA Blue Marble Next Generation January topography image, brightened in the globe display. Camera opens toward the North American plate in a slightly tilted view.</p>
-      <footer className="page-footer"><span>QUAKESWARM · GLOBE LAB</span><span>Markers come from the bounded live API response; the map does not load the full event catalog.</span></footer>
+      <footer className="page-footer"><span>QUAKESWARM · GLOBE LAB</span><span>Markers come from the bounded stored-catalog API response; the map does not load the full event catalog.</span></footer>
     </main>
   )
 }

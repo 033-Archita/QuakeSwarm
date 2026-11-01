@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import L from 'leaflet'
 import { CircleMarker, MapContainer, Marker, TileLayer, Tooltip, useMap } from 'react-leaflet'
+import InvalidateMapSize from './InvalidateMapSize.jsx'
+import { mapColors } from '../mapColors.js'
 
 const sequenceIcon = L.divIcon({
   className: 'sequence-map-icon',
@@ -17,15 +19,48 @@ function RecenterMap({ selected }) {
   return null
 }
 
+function LockWorldViewAtMinimumZoom() {
+  const map = useMap()
+
+  useEffect(() => {
+    const enforceZoomState = () => {
+      if (map.getZoom() <= map.getMinZoom()) {
+        map.dragging.disable()
+        map.setView([18, 8], map.getMinZoom(), { animate: false })
+      } else {
+        map.dragging.enable()
+      }
+    }
+
+    map.on('zoomend', enforceZoomState)
+    enforceZoomState()
+    return () => map.off('zoomend', enforceZoomState)
+  }, [map])
+
+  return null
+}
+
 function magnitudeColor(magnitude) {
-  if (magnitude >= 5) return 'var(--activity-red)'
-  if (magnitude >= 3.5) return 'var(--seismic-orange)'
-  return 'var(--sandstone)'
+  if (magnitude >= 5) return mapColors.red
+  if (magnitude >= 3.5) return mapColors.orange
+  return mapColors.sandstone
 }
 
 export default function EventMap({ layer, events, swarms, highlightEvents, selected, onSelect }) {
   return (
-    <MapContainer className="event-map" center={[18, 8]} zoom={2} minZoom={2} scrollWheelZoom>
+    <MapContainer
+      className="event-map"
+      center={[18, 8]}
+      zoom={2}
+      minZoom={2}
+      maxBounds={[[-85, -180], [85, 180]]}
+      maxBoundsViscosity={1}
+      keyboard={false}
+      scrollWheelZoom
+      preferCanvas
+    >
+      <InvalidateMapSize />
+      <LockWorldViewAtMinimumZoom />
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -36,7 +71,7 @@ export default function EventMap({ layer, events, swarms, highlightEvents, selec
           key={event.id}
           center={[event.lat, event.lon]}
           radius={Math.max(4, Math.min(13, 3 + event.mag * 1.5))}
-          pathOptions={{ color: 'var(--graphite)', weight: 1, fillColor: magnitudeColor(event.mag), fillOpacity: 0.82 }}
+          pathOptions={{ color: mapColors.graphite, weight: 1, fillColor: magnitudeColor(event.mag), fillOpacity: 0.82 }}
           eventHandlers={{ click: () => onSelect({ type: 'event', data: event, position: [event.lat, event.lon] }) }}
         >
           <Tooltip>{`M ${event.mag.toFixed(1)} · ${event.place || 'Location not available'}`}</Tooltip>
@@ -60,7 +95,7 @@ export default function EventMap({ layer, events, swarms, highlightEvents, selec
             key={swarm._id}
             center={position}
             radius={Math.max(7, Math.min(16, 5 + Math.sqrt(swarm.n_events)))}
-            pathOptions={{ color: 'var(--graphite)', weight: 1.5, fillColor: 'var(--slate-blue)', fillOpacity: 0.82 }}
+            pathOptions={{ color: mapColors.graphite, weight: 1.5, fillColor: mapColors.slate, fillOpacity: 0.82 }}
             eventHandlers={{ click: () => onSelect({ type: 'swarm', data: swarm, position }) }}
           >
             <Tooltip>{`Swarm · ${title}`}</Tooltip>
@@ -72,7 +107,7 @@ export default function EventMap({ layer, events, swarms, highlightEvents, selec
           key={`member-${event.id}`}
           center={[event.lat, event.lon]}
           radius={5}
-          pathOptions={{ color: 'var(--graphite)', weight: 1, fillColor: 'var(--seismic-orange)', fillOpacity: 1 }}
+          pathOptions={{ color: mapColors.graphite, weight: 1, fillColor: mapColors.orange, fillOpacity: 1 }}
         >
           <Tooltip>{`Cluster event · M ${Number(event.mag).toFixed(1)}`}</Tooltip>
         </CircleMarker>
