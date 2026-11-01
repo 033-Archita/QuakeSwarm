@@ -1,43 +1,48 @@
 # QuakeSwarm
 
-QuakeSwarm downloads real earthquake events from the USGS FDSN catalog, stores them in MongoDB, detects spatial-temporal clusters with DBSCAN, and presents live records through a FastAPI and React application. The frontend has an Overview, Swarm Explorer, three focused Analytics pages, a combined About / Info area, and an experimental 3D Globe Lab.
+QuakeSwarm retrieves real earthquake events from the USGS FDSN catalog, stores them in MongoDB, detects spatial-temporal clusters with DBSCAN, and displays the records in a FastAPI and React application. The interface includes Overview, Swarm Explorer, three focused Analytics pages, About / Info, and an optional 3D Globe Lab.
 
-## Stack and layout
+## Data and method
 
-- Python 3.10+, FastAPI, PyMongo, NumPy, scikit-learn, requests, python-dotenv
-- MongoDB, with `events` and `swarms` collections
-- `backend/config.py`: environment and algorithm defaults
-- `backend/db.py`: shared MongoDB client and indexes
-- `backend/scripts/ingest.py`: USGS fetch, validation and idempotent upsert
-- `backend/scripts/detect.py`: DBSCAN clustering and swarm document generation
-- `backend/db_queries.py`: MongoDB read/query helpers used by the routes
-- `backend/main.py`: FastAPI routes
-- `frontend/src/api.js`: shared frontend API client
-- `frontend/src/pages/Overview.jsx`: live-data Overview page
-- `frontend/src/components/EventMap.jsx`: Leaflet earthquake and swarm map
-- `frontend/src/pages/SwarmExplorer.jsx`: filterable cluster catalog and event-level detail
-- `frontend/src/pages/Analytics.jsx`: 12 live Plotly charts split across three routes
-- `frontend/src/pages/WhyMongoDB.jsx`: live index metadata and on-demand regional/global benchmark
-- `frontend/src/pages/AboutInfo.jsx`: combined swarm guide and database information tabs
-- `frontend/src/pages/GlobeLab.jsx`: isolated, lazy-loaded 3D view using `react-globe.gl`
-- `frontend/src/pages/AboutSwarms.jsx`: explanation of the catalog floor and detection thresholds
-- `frontend/src/catalog.js`: shared date/magnitude limits and displayed detection defaults
-- `frontend/src/geography.js` and `frontend/public/countries.json`: centroid-to-country/continent lookup for Swarm Explorer using Natural Earth boundaries
+The configured catalog covers 2015-01-01 through 2025-12-31 with a minimum magnitude of 2.5. Ingestion validates USGS records and upserts them by event ID. Detection converts longitude, latitude, and elapsed time to scaled coordinates and applies DBSCAN using the configured 15 km spatial scale, 7 day temporal scale, and 20-event minimum. A cluster is classified as `mainshock_sequence` when its largest event leads the second-largest by at least 1.2 magnitude units, or when its largest event is at least M6.0 and falls within the first 25% of the cluster time span. Otherwise it is `swarm`; if the magnitude gap cannot be computed, it is `unclassified`. This is a data exploration heuristic, not a seismological determination.
 
-## Setup and run
+**Catalog coverage caveat:** USGS publishes M2.5+ events for the United States but roughly M4.0+ elsewhere. Low-magnitude results, including top regions and the 3.5–4.0 magnitude-distribution dip, therefore over-represent US areas. The project does not alter the catalog to compensate for this coverage difference.
 
-Install MongoDB locally or use an Atlas connection string. Copy `backend/.env.example` to `backend/.env` and set `MONGODB_URI` and `DB_NAME`. From the repository root, install pinned dependencies and start the backend:
+MongoDB stores source events in `events` with a GeoJSON Point `[longitude, latitude]` and cluster summaries in `swarms` with member event IDs. The configured indexes are `events.location` (2dsphere), `events.time` (ascending), `events.mag` (ascending), and `swarms.start` (ascending); `/api/indexes` reads the actual definitions from the connected database. The About / Info page describes the collection model, live index list, and how geospatial/time queries and aggregation pipelines fit this data. The region chart derives its region from text after the final comma in USGS `place`, which is a display heuristic. A cluster `bbox` may be misleading for a cluster crossing the ±180° longitude boundary; the centroid calculation uses unit-sphere vectors to handle that boundary.
+
+### Current local data snapshot
+
+The configured local MongoDB currently contains 310,333 USGS events (83,279,944 bytes of document data) and 425 detected clusters (1,374,771 bytes of document data). Running `python -m backend.scripts.detect` on those events produced 293 `swarm`, 132 `mainshock_sequence`, and 0 `unclassified` records with the classification rule above. These are database measurements from the current local run, not constants in the application; rerunning ingestion or detection may change them.
+
+## Project structure
+
+- `backend/config.py`: connection, ingestion, and detection defaults
+- `backend/db.py`: MongoDB client and index setup
+- `backend/scripts/ingest.py`: USGS fetch, validation, and idempotent upsert
+- `backend/scripts/detect.py`: clustering and swarm document generation
+- `backend/db_queries.py`: MongoDB read and aggregation helpers
+- `backend/main.py`: FastAPI routes and request validation
+- `frontend/src/pages/Overview.jsx`: live event and swarm overview
+- `frontend/src/pages/SwarmExplorer.jsx`: filterable cluster catalog and detail
+- `frontend/src/pages/Analytics.jsx`: event, cluster, and structure charts
+- `frontend/src/pages/AboutInfo.jsx`: combined swarm guide and database information
+- `frontend/src/pages/WhyMongoDB.jsx`: collection model and live index metadata
+- `frontend/src/pages/GlobeLab.jsx`: isolated lazy-loaded 3D view
+
+## Setup
+
+Use Python 3.10+, Node.js, and a running MongoDB instance or Atlas database. Copy `backend/.env.example` to `backend/.env`, then set `MONGODB_URI` and `DB_NAME`. Copy `frontend/.env.example` to `frontend/.env` if you need to set `VITE_API_URL`.
+
+From the repository root:
 
 ```powershell
 python -m pip install -r backend/requirements.txt
 python -m uvicorn main:app --reload
 ```
 
-The root `main.py` forwards to `backend.main`, so this command also works from the `backend` directory: `python -m uvicorn main:app --reload`.
+The root `main.py` forwards to `backend.main`, so the same Uvicorn command also works from the `backend` directory. The API is available at `http://127.0.0.1:8000`; interactive API documentation is at `/docs`. On macOS/Linux, use `python3` instead of `python` if needed.
 
-Mac/Linux uses the same commands with `python3` in place of `python` where needed. The API defaults to `http://127.0.0.1:8000`; Swagger UI is at `/docs`.
-
-In another terminal from the repository root, install pinned frontend packages and start Vite:
+In another terminal:
 
 ```powershell
 cd frontend
@@ -45,70 +50,46 @@ npm install
 npm run dev
 ```
 
-The app opens at `http://127.0.0.1:5173` and reads the API URL from `frontend/.env` (`frontend/.env.example` supplies the default). The Overview API connection indicator calls `/api/health` and can be clicked to retry.
+The frontend opens at `http://127.0.0.1:5173`. It reads its API URL from `frontend/.env`; `.env.example` supplies the default.
 
-In a second terminal from the repository root, ingest a date interval or run the default range (2015-01-01 through 2025-12-31, magnitude 2.5+):
+To ingest the configured catalog and generate cluster records, run from the repository root:
 
 ```powershell
-python -m backend.scripts.ingest --start 2024-01-01 --end 2024-02-01 --minmag 2.5 --chunk-days 30
 python -m backend.scripts.ingest
 python -m backend.scripts.detect
 ```
 
-## Tests and frontend
-
-Run the backend test suite from the repository root with `python -m pytest -p no:cacheprovider backend/tests`. The Phase 4 suite covers classification, spherical coordinates, empty/tiny detection, USGS chunking and duplicate avoidance, event validation and null handling, benchmark query plans, and API validation/responses. Analytics, Swarm Explorer, About / Info, and Globe Lab are lazy-loaded, and requests use the shared `frontend/src/api.js` client.
-
-The interface limits date filters to 2015-01-01 through 2025-12-31 and magnitude controls to M 2.5 and above, matching ingestion defaults. Swarm Explorer filters by kind, date, country, continent, event count, maximum event magnitude, duration, and sort order. Country and continent are estimated from each cluster centroid using Natural Earth boundaries; the 1:110m data is intentionally generalized for globe-scale filtering.
-
-Globe Lab uses at most 800 earthquake markers plus 200 cluster markers by default. It requests the existing `/api/events` and `/api/swarms` routes and does not load the full event collection. The NASA Blue Marble Next Generation January topography JPEG is included at `frontend/public/earth-blue-marble.jpg`; CSS brightens and softens its colors in the displayed globe, which starts centered on North America. NASA imagery is generally available for reuse under [NASA's media guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/). To remove Globe Lab, delete `frontend/src/pages/GlobeLab.jsx`, remove its lazy import, route and navigation link from `frontend/src/App.jsx`, and remove `react-globe.gl` from `frontend/package.json` and its lockfile.
-
-Analytics pages are `/analytics/activity`, `/analytics/clusters`, and `/analytics/structure`; `/analytics` redirects to the activity page. Each analytics section owns its filters. About / Info combines the swarm method guide and MongoDB explanation under `/about`; the previous `/mongodb` and `/about-swarms` paths redirect there.
-
-Detection defaults are `SPACE_KM=15`, `TIME_DAYS=7`, `MIN_EVENTS=20`, and `MAG_GAP_THRESHOLD=1.2`; CLI flags can override them. Detection replaces `swarms` on every run.
-
-## Data and method
-
-USGS requests use `https://earthquake.usgs.gov/fdsnws/event/1/query` and its `/count` endpoint. Ingestion checks counts, recursively bisects requests over 20,000 events, validates required id/time/magnitude/coordinates, and upserts by USGS event id. Missing optional depth, magnitude type, place, or URL remains null. Invalid records are skipped and counted. Existing date chunks with matching event counts are skipped to avoid routine re-downloads.
-
-`events._id` is the USGS id. Event documents include UTC `time`, magnitude fields, optional place/depth, GeoJSON `location` in `[longitude, latitude]` order, and URL. Indexes are `events.location` (2dsphere), `events.time`, `events.mag`, and `swarms.start`.
-
-Detection converts geographic coordinates to 3D Earth-centered kilometers and scales elapsed days by `SPACE_KM / TIME_DAYS`, then runs Euclidean DBSCAN with `eps=SPACE_KM` and `min_samples=MIN_EVENTS`. A cluster is a `mainshock_sequence` when its largest-minus-second-largest magnitude is at least 1.2 by default; otherwise it is a `swarm`. A cluster with fewer than two magnitudes is `unclassified`. This is a heuristic spatial-temporal clustering method, not an authoritative seismological classification or a prediction. The centroid averages 3D unit-sphere vectors; the stored `bbox` can look misleading for clusters crossing ±180° longitude.
-
-The region chart helper uses the text after the last comma in USGS `place` as a region, or the full place when there is no comma. This is a text heuristic.
+A smaller ingestion interval can be supplied with `--start`, `--end`, `--minmag`, and `--chunk-days`. Detection options are listed by `python -m backend.scripts.detect --help`.
 
 ## API
 
-All routes return JSON. `GET /api/health` and `/api/stats` provide status and counts; `GET /api/indexes` reads current index metadata from MongoDB. `GET /api/events` supports bounding box, date, magnitude, sort, and limit filters; its spatial filter uses `$geoWithin` + `$box`. `GET /api/swarms` lists clusters and `GET /api/swarms/{id}` returns the cluster and its events. Analytics routes are `/api/timeline`, `/api/analytics/magnitude-distribution`, `/api/analytics/depth-distribution`, `/api/analytics/magnitude-depth`, `/api/analytics/regions`, `/api/analytics/magnitude-types`, `/api/analytics/swarm-summary`, `/api/analytics/swarm-scatter`, `/api/analytics/swarm-timeline`, `/api/analytics/swarm-radius`, and `/api/analytics/inter-event-times`. `GET /api/benchmark` returns separate regional and global cases; each compares 2dsphere, time-index, and natural collection hints and includes a matched count plus timing and execution statistics. Query parameter validation errors use HTTP 422.
+All endpoints return JSON. `/api/health`, `/api/stats`, and `/api/indexes` report database state and metadata. `/api/events` accepts bounding-box, date, magnitude, sorting, and limit filters. `/api/swarms` lists detected clusters, and `/api/swarms/{id}` returns a cluster with its event records.
 
-## Results and limitations
+Analytics endpoints are `/api/timeline`, `/api/analytics/magnitude-distribution`, `/api/analytics/depth-distribution`, `/api/analytics/magnitude-depth`, `/api/analytics/regions`, `/api/analytics/magnitude-types`, `/api/analytics/swarm-summary`, `/api/analytics/swarm-scatter`, `/api/analytics/swarm-timeline`, `/api/analytics/swarm-radius`, and `/api/analytics/inter-event-times`. Invalid dates, bounds, and typed query values return HTTP 422; an unknown swarm ID returns 404.
 
-Verified against the configured local MongoDB and live USGS API:
+## Verification
 
-- The one-month check (2025-01-01 to 2025-02-01, magnitude 4.5+) stored 655 events with 0 skipped. Re-running it skipped the complete interval and added no duplicates.
-- The default historical ingestion (2015-01-01 to 2025-12-31, magnitude 2.5+) finished with 310,333 event documents and 0 invalid records skipped. `collStats` reported 83,279,944 bytes of event document storage (about 79.4 MiB; excludes indexes).
-- Whole-dataset DBSCAN processed 310,333 events and detected 425 clusters: 356 `swarm`, 69 `mainshock_sequence`, 0 `unclassified`. A second full run replaced and reproduced those results.
-- The Phase 4 benchmark used one warm-up and five timed cursor reads per plan/case on this local MongoDB. The regional default is box `[-120, 32, -115, 36]`, 2024-01-01 through 2024-12-31. It returned 490 of 310,333 events (0.158%). Averages: 2dsphere hint 3,033.80 ms, 310,333 examined; time index hint 203.55 ms, 24,954 examined; natural scan 796.58 ms, 310,333 examined. The 2dsphere hint used a full-range index scan for this `$box` query in the observed explain plan, so it did not narrow documents examined.
-- The retained global case uses the original global box and 2020-01-01 through 2023-12-31; it returned 114,353 events (36.848%). Averages: 2dsphere hint 3,773.55 ms, 310,333 examined; time index hint 1,346.46 ms, 114,353 examined; natural scan 1,432.08 ms, 310,333 examined. These are measurements on this database and machine, not general performance guarantees. The API reports each run and `executionStats` values without substituting estimated figures.
-- Phase 2 API smoke checks returned HTTP 200 for the 17 original endpoints, including all 12 analytics routes and the benchmark; invalid event limits and reversed dates returned 422. A swarm detail request returned 20 matching events. Phase 3b separately verified `/api/indexes` and the five data routes used by the frontend.
-- Phase 3a production build passed with Vite 8.3.5. The initial app JavaScript was 416.66 kB (127.27 kB gzip); the lazy Plotly activity-chart chunk was 1,161.09 kB (385.09 kB gzip). The Plotly chunk uses the official basic bundle for bar, scatter and pie traces; line charts use scatter traces in line mode. [Bundle details](https://www.npmjs.com/package/plotly.js-basic-dist-min)
-- Phase 4 frontend production build passed with Vite 8.3.5: initial JavaScript 410.14 kB (125.26 kB gzip), shared Plotly 1,160.60 kB (384.81 kB gzip), Globe Lab 1,985.58 kB (557.54 kB gzip), and Swarm Explorer 16.08 kB (5.21 kB gzip). Vite reports Plotly and Globe Lab chunks above its 500 kB advisory threshold.
-- After the UI updates, Vite served the document, About Swarms page, Swarm Explorer page, Globe Lab page, and Natural Earth boundary asset with HTTP 200. Visual layout and WebGL behavior still need manual review in a browser.
-- During Phase 3b, `/api/health`, `/api/indexes`, `/api/stats`, `/api/events?limit=2`, and `/api/swarms` returned successfully against the configured database; the index endpoint returned two collection definitions and the swarm list returned 425 records. Vite served the document, entry module, and all four implemented page modules with HTTP 200. Browser-based visual checks were not available; visual layout, interaction, and WebGL rendering still need manual review with both servers running.
-- In the Phase 4 Vite HTTP smoke check, the dev server returned HTTP 200 for Overview, Swarm Explorer/list/detail, all three Analytics routes, About / Info, Globe Lab, and the Analytics/About/Why MongoDB page modules. This confirms the dev server route fallback and source-module serving; it does not validate browser rendering or interaction.
+Run backend tests from the repository root with:
 
-### Phase 4 verification
+```powershell
+python -m pytest -p no:cacheprovider backend/tests
+```
 
-**Implemented and tested:** 15 backend pytest tests pass (`python -m pytest -p no:cacheprovider backend/tests -vv -s`). They cover magnitude-gap classification, spherical centroid behavior at the dateline, empty/tiny detection, USGS date chunk generation and recursive split logic, complete-chunk duplicate avoidance, USGS record transformation and nulls, benchmark plan execution, and basic API responses/422 validation. The live one-month USGS check confirmed 655 existing events and skipped the chunk with 0 inserts/updates. Two full detection runs each processed 310,333 events in 27.49 s and 26.97 s and reproduced the same 425 clusters. `collStats` reported 83,279,944 event bytes and 1,373,952 swarm bytes (document storage, excluding indexes).
+Build the frontend with:
 
-All 12 chart requests (including the year/month variants of the timeline) and the other API smoke requests returned HTTP 200. Geographic, date, and magnitude filters returned 490 matching event records and each record was checked against the requested bounds. The date/kind swarm filter returned 24 matching clusters. A live swarm detail response contained all 76 requested member events with IDs matching its stored `event_ids`. The 2024 depth distribution summed to the 24,954 matching events; the swarm summary count matched MongoDB's 33 cluster starts in that interval; API stats matched database counts. The new benchmark endpoint was exercised with `runs=1`, and the benchmark helper was also run with its default `runs=5` to collect the documented measurements above. Sample request latency in this local run was 10–179 ms for chart endpoints; `/api/stats` was 411 ms. One-run benchmark request latency was 34.0 s.
+```powershell
+cd frontend
+npm run build
+```
 
-**Implemented but not fully tested:** The production frontend bundle builds. Browser automation was not available in this environment, so visual rendering, filtering interactions, event/swarm selection, browser console errors, and desktop/mobile layouts still require manual checking in a browser with the API and frontend running. Globe WebGL interaction was not re-verified in a browser. Vite reports large Plotly and Globe Lab chunks as described above. TestClient emits a Starlette/httpx deprecation warning; the installed Requests/urllib3 versions also emit a compatibility warning.
+Interactive layout, browser console behavior, and WebGL rendering should be checked in a browser with the API and frontend running.
 
-**Not implemented:** No Phase 4 feature requirements remain unimplemented. The remaining browser checks are manual verification tasks, not missing code features.
+## Known limitations
 
-Manual browser checklist: open Overview, Swarm Explorer/list/detail, all three Analytics routes, About / Info tabs, and Globe Lab; change date/magnitude/kind/cluster filters and confirm only the current page changes; select an earthquake and a swarm; inspect loading/error/unavailable states; check browser console and desktop/mobile layout; confirm Globe Lab renders and responds to marker clicks.
+DBSCAN processes the valid catalog events in memory. The cluster labels depend on the configured distance, time, sample-count, and magnitude thresholds. Region parsing uses USGS place text as described above. The USGS catalog has uneven geographic magnitude coverage, so low-magnitude maps and summaries over-represent US areas. Globe Lab is optional and its large WebGL bundle is lazy-loaded.
+
+To remove Globe Lab, remove its route and navigation link from `frontend/src/App.jsx`, delete `frontend/src/pages/GlobeLab.jsx`, and remove `react-globe.gl` from `frontend/package.json` (then update the lockfile with the package manager).
 
 ## Credits
 
-Data source: [USGS Earthquake Catalog](https://earthquake.usgs.gov/earthquakes/feed/v1.0/). The map uses [Leaflet](https://leafletjs.com/) (BSD 2-Clause license) and [OpenStreetMap tiles](https://www.openstreetmap.org/copyright) (© OpenStreetMap contributors; ODbL). The charts use [Plotly's basic distribution](https://www.npmjs.com/package/plotly.js-basic-dist-min) (MIT license). Typography uses [IBM Plex Sans](https://fonts.google.com/specimen/IBM+Plex+Sans). Globe Lab uses [NASA Blue Marble Next Generation topography](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-topography/) (January 2004, 5400×2700); see [NASA's image and media guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/) for reuse terms. The Swarm Explorer's [Natural Earth country data](https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_admin_0_countries.geojson) is public domain under [Natural Earth's terms](https://www.naturalearthdata.com/about/terms-of-use/). `react-globe.gl` is MIT licensed ([package](https://www.npmjs.com/package/react-globe.gl)). The project was built with AI assistance; design choices and evaluation are the student's responsibility.
+Data source: [USGS Earthquake Catalog](https://earthquake.usgs.gov/earthquakes/feed/v1.0/). The map uses [Leaflet](https://leafletjs.com/) and [OpenStreetMap tiles](https://www.openstreetmap.org/copyright). Charts use [Plotly basic distribution](https://www.npmjs.com/package/plotly.js-basic-dist-min). Globe Lab uses [NASA Blue Marble Next Generation topography](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/base-topography/). Country boundaries in Swarm Explorer come from [Natural Earth](https://www.naturalearthdata.com/about/terms-of-use/). The project was built with AI assistance; design choices and evaluation are the student's responsibility.

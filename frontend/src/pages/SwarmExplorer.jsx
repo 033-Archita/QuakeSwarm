@@ -97,7 +97,7 @@ function SwarmList({ filters, setFilters }) {
           {filteredRows.length > pageSize && <nav className="result-pagination" aria-label="Cluster result pages"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>← Previous</button><span>{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filteredRows.length)} of {filteredRows.length}</span><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}>Next →</button></nav>}
         </section>
       </div>
-      <p className="method-note swarm-method-note"><span>CLASSIFICATION</span> A cluster is labelled mainshock sequence when its top magnitude gap meets the configured threshold; other clusters are labelled swarms. This is a heuristic classification, not authoritative seismology.</p>
+      <p className="method-note swarm-method-note"><span>CLASSIFICATION</span> Mainshock sequences meet the configured magnitude-gap rule, or contain an M 6.0+ largest event in the first quarter of the cluster’s time span. Other classifiable clusters are swarms; a cluster without two magnitudes is unclassified. These heuristic labels are not authoritative seismology.</p>
       <footer className="page-footer"><span>QUAKESWARM · SWARM EXPLORER</span><span>Rows are retrieved from the MongoDB swarms collection.</span></footer>
     </main>
   )

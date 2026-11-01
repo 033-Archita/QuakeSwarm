@@ -52,16 +52,7 @@ MIN_EVENTS: int = 20
 # mainshock-aftershock sequence than a swarm.
 MAG_GAP_THRESHOLD: float = 1.2
 
-# ── Benchmarking defaults ────────────────────────────────────────────
-# The focused query is a one-year southern California sample; it returned
-# well below 5% of this project's full catalog when selected. Coordinates
-# are [minLon, minLat, maxLon, maxLat].
-BENCHMARK_REGIONAL_BOX: list = [-120, 32, -115, 36]
-BENCHMARK_REGIONAL_START: str = "2024-01-01"
-BENCHMARK_REGIONAL_END: str = "2024-12-31"
-
-# Preserve the original global comparison as a separate case.
-BENCHMARK_BOX: list = [-180, -90, 180, 90]
-BENCHMARK_START: str = "2020-01-01"
-BENCHMARK_END: str = "2023-12-31"
-BENCHMARK_RUNS: int = 5
+# A large event near the beginning of a cluster can indicate a mainshock
+# sequence even when its lead over the second-largest event is below 1.2.
+EARLY_MAINSHOCK_MAGNITUDE: float = 6.0
+EARLY_MAINSHOCK_FRACTION: float = 0.25

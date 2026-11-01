@@ -1,93 +1,78 @@
-# QuakeSwarm execution flow (Phases 1–4)
+# QuakeSwarm execution flow
 
-This file documents the current code paths for ingestion, detection, API, and the frontend pages. Analytics is split across activity, cluster, and structure routes; About / Info combines the swarm guide and MongoDB explanation. Globe Lab is intentionally isolated in one lazy-loaded page module.
+This document follows the checked-in implementation. The system ingests USGS events, detects spatial-temporal clusters, serves MongoDB-backed API responses, and renders them in a React application.
 
-## A. Application startup
+## A. Startup
 
-`backend/main.py` constructs the FastAPI `app`, registers CORS for Vite origins, and on startup calls `db.get_client()`, pings MongoDB, then calls `db.ensure_indexes()`. `backend/db.py` caches one `MongoClient` and provides `get_db()`. The root `main.py` forwards `main:app` to `backend.main`. The frontend starts with `cd frontend; npm install; npm run dev`; `index.html` loads `src/main.jsx`, which mounts `App` inside `BrowserRouter`.
+`backend/main.py` constructs the FastAPI `app`, configures local Vite CORS origins, and registers `startup()`. Startup calls `db.get_client()`, pings MongoDB, and calls `db.ensure_indexes()`. `db.get_db()` returns the configured database. The repository-root `main.py` forwards to `backend.main`. The frontend entry `frontend/src/main.jsx` mounts `App` inside `BrowserRouter`.
 
-## B. Ingestion flow
+## B. Ingestion
 
-`backend/scripts/ingest.py:main()` parses `--start`, `--end`, `--minmag`, and `--chunk-days`, opens `db.get_db().events`, and calls `db.ensure_indexes()`. It gets fixed date intervals from `_generate_date_chunks()`. For each chunk, `_split_and_fetch()` calls `_get_usgs_count()`, which builds common USGS query parameters with `_build_params()` and uses `_usgs_get()` against the `/count` endpoint. Counts above 20,000 are divided recursively at the midpoint. For smaller non-empty intervals it compares the database count in the time range and skips downloading when that count equals the USGS count.
+`backend/scripts/ingest.py:main()` parses the range, magnitude floor, and chunk size; opens the events collection; and ensures indexes. `_generate_date_chunks()` splits the requested interval. For each chunk, `_split_and_fetch()` gets the USGS count through `_get_usgs_count()`, which builds parameters with `_build_params()` and sends requests through `_usgs_get()`. Chunks over the USGS request limit are recursively divided. Complete chunks already represented in MongoDB are skipped.
 
-Intervals needing retrieval go through `_fetch_and_upsert()`: it calls the USGS `/query` endpoint through `_usgs_get()`, parses GeoJSON features with `_parse_feature()`, validates required id, time, magnitude and finite coordinate values, and maps `[lon, lat, depth]` to a MongoDB document with a GeoJSON Point. Invalid features increment `counters['skipped']`; valid events use `UpdateOne` with `upsert=True`, keyed by USGS `_id`, and are sent with `bulk_write()`. The count parser accepts the plain integer and JSON-object response shapes from the USGS count endpoint. Existing-count checks include the requested magnitude threshold. The script prints progress, inserted/modified/skipped counts, and the final events document count.
+Chunks needing retrieval go through `_fetch_and_upsert()`. `_parse_feature()` validates each USGS GeoJSON feature and maps its coordinates to a MongoDB GeoJSON Point. Valid records are idempotently written with `UpdateOne(..., upsert=True)` and `bulk_write()` using the USGS event ID.
 
-## C. Swarm detection flow
+## C. Detection
 
-`backend/scripts/detect.py:main()` parses the DBSCAN overrides and calls `detect()`. `detect()` loads valid time/magnitude/location documents from MongoDB and sorts them by time. It deletes the old `swarms` documents before handling empty/tiny input. For each event it converts longitude/latitude to radians, computes Earth-centered `x/y/z` kilometers using Earth radius 6371 km, calculates days since the first event, and appends `elapsed_days * (space_km / time_days)` as the time coordinate. It runs scikit-learn `DBSCAN` with Euclidean distance, `eps=space_km` and `min_samples=min_events`.
+`backend/scripts/detect.py:main()` validates detection overrides and calls `detect()`. `detect()` loads valid events in time order and prepares scaled Earth-centered spatial coordinates plus elapsed time. It applies scikit-learn `DBSCAN` with the configured spatial and temporal scales and minimum event count. Noise label `-1` is ignored. `members_by_label` groups cluster members in one pass; `build_swarm()` calculates spherical centroid, radius, time span, bounds, member IDs, and magnitude values.
 
-Noise label `-1` is dropped. Each other label is passed to `build_swarm()`, which obtains a spherical centroid via `spherical_centroid()`, computes great-circle distances for `radius_km`, duration, bbox, event ids and the largest event label. `classify_magnitudes()` determines `max_mag`, `second_mag`, `mag_gap` and kind using the configured gap threshold; a cluster without two magnitudes is `unclassified`. Documents are inserted into `swarms`, and counts per kind are printed. This is a heuristic, not an authoritative seismological classification or prediction. The implementation currently runs the entire dataset in memory; no year-window fallback is implemented.
+A cluster is `mainshock_sequence` if its magnitude gap is at least `MAG_GAP_THRESHOLD` (1.2), or if its maximum magnitude is at least `EARLY_MAINSHOCK_MAGNITUDE` (6.0) and that event is within `EARLY_MAINSHOCK_FRACTION` (0.25) of the cluster's start-to-end time span. Otherwise it is `swarm`. When the gap cannot be computed because fewer than two magnitudes are available, it is `unclassified`. This classification is a heuristic. New swarm documents are computed before the previous collection contents are deleted.
 
-## D. Backend API flow
+## D. API routes
 
-Routes in `backend/main.py` validate query inputs and call same-purpose helpers in `backend/db_queries.py`:
+`backend/main.py` validates query parameters and delegates to same-purpose functions in `backend/db_queries.py`.
 
-| Request | Route | Helper / database operation |
+| Route | Route function | Query helper |
 |---|---|---|
-| `GET /api/health` | `health()` | `db_queries.health()` pings MongoDB |
-| `GET /api/indexes` | `indexes()` | `db_queries.indexes()` reads current index definitions for `events` and `swarms` |
-| `GET /api/stats` | `stats()` | `db_queries.stats()` counts documents and aggregates min/max event times |
-| `GET /api/events` | `events()` | `db_queries.events()` applies `$geoWithin` + `$box`, date/magnitude filters, sort and limit; `_event_doc()` maps GeoJSON coordinates to `lat`/`lon` |
-| `GET /api/swarms` | `swarms()` | `db_queries.swarms()` filters and excludes `event_ids` |
-| `GET /api/swarms/{swarm_id}` | `swarm_detail()` | `db_queries.swarm_detail()` loads the cluster and its event documents |
-| `GET /api/timeline` | `timeline()` | `db_queries.timeline()` groups events with `$dateToString` by year/month |
-| `GET /api/analytics/magnitude-distribution` | `magnitude_distribution()` | `db_queries.magnitude_distribution()` buckets magnitudes at 0.5 intervals |
-| `GET /api/analytics/depth-distribution` | `depth_distribution()` | `db_queries.depth_distribution()` facets depth buckets and null-depth count |
-| `GET /api/analytics/magnitude-depth` | `magnitude_depth()` | `db_queries.magnitude_depth()` samples at most 5000 non-null depths |
-| `GET /api/analytics/regions` | `regions()` | `db_queries.regions()` groups using place text after its last comma |
-| `GET /api/analytics/magnitude-types` | `magnitude_types()` | `db_queries.magnitude_types()` groups null as `Not available` |
-| `GET /api/analytics/swarm-summary` | `swarm_summary()` | `db_queries.swarm_summary()` aggregates cluster counts and averages |
-| `GET /api/analytics/swarm-scatter` | `swarm_scatter()` | `db_queries.swarm_scatter()` projects scatter fields |
-| `GET /api/analytics/swarm-timeline` | `swarm_timeline()` | `db_queries.swarm_timeline()` groups swarm starts by period and kind |
-| `GET /api/analytics/swarm-radius` | `swarm_radius()` | `db_queries.swarm_radius()` buckets stored radii in 10 km groups |
-| `GET /api/analytics/inter-event-times` | `inter_event_times()` | `db_queries.inter_event_times()` loads each cluster's event times and counts gaps in hour bins |
-| `GET /api/benchmark` | `benchmark()` | `db_queries.benchmark()` runs regional and global queries under 2dsphere, time-index, and `$natural` hints; timings come from cursor reads and document counts from `executionStats` |
+| `GET /api/health` | `health()` | `health()` |
+| `GET /api/indexes` | `indexes()` | `indexes()` |
+| `GET /api/stats` | `stats()` | `stats()` |
+| `GET /api/events` | `events()` | `events()` |
+| `GET /api/swarms` | `swarms()` | `swarms()` |
+| `GET /api/swarms/{swarm_id}` | `swarm_detail()` | `swarm_detail()` |
+| `GET /api/timeline` | `timeline()` | `timeline()` |
+| `GET /api/analytics/magnitude-distribution` | `magnitude_distribution()` | `magnitude_distribution()` |
+| `GET /api/analytics/depth-distribution` | `depth_distribution()` | `depth_distribution()` |
+| `GET /api/analytics/magnitude-depth` | `magnitude_depth()` | `magnitude_depth()` |
+| `GET /api/analytics/regions` | `regions()` | `regions()` |
+| `GET /api/analytics/magnitude-types` | `magnitude_types()` | `magnitude_types()` |
+| `GET /api/analytics/swarm-summary` | `swarm_summary()` | `swarm_summary()` |
+| `GET /api/analytics/swarm-scatter` | `swarm_scatter()` | `swarm_scatter()` |
+| `GET /api/analytics/swarm-timeline` | `swarm_timeline()` | `swarm_timeline()` |
+| `GET /api/analytics/swarm-radius` | `swarm_radius()` | `swarm_radius()` |
+| `GET /api/analytics/inter-event-times` | `inter_event_times()` | `inter_event_times()` |
 
-The API validates date order, bounding boxes, enum parameters and limits. FastAPI returns HTTP 422 for invalid typed/range parameters. Missing swarm IDs return 404.
+Date and bounding-box validation errors return HTTP 422. A missing cluster detail returns HTTP 404. The `/api/indexes` route returns index metadata directly from MongoDB.
 
-## E. Frontend flow
+## E. Frontend
 
-`frontend/index.html` loads `frontend/src/main.jsx`, which imports Leaflet CSS and the shared styles, then mounts `App` inside `BrowserRouter`. `App` checks `/api/health` through `apiRequest()` and provides shared navigation. Analytics, Swarm Explorer, About / Info, and Globe Lab are loaded with `React.lazy`. `/analytics` redirects to `/analytics/activity`; the three Analytics subsections are separate routes. About / Info (`AboutInfo.jsx`) switches between `AboutSwarms.jsx` and `WhyMongoDB.jsx`; old `/mongodb` and `/about-swarms` URLs redirect to `/about`. `api.js` is the shared API/static-asset request module and `useApiResource.js` provides abortable loading/error/retry state for query-backed views.
+`src/main.jsx` imports Leaflet styles and the shared stylesheet, then mounts `App`. `App` provides navigation and checks `/api/health`. Analytics, Swarm Explorer, About / Info, and Globe Lab are lazy-loaded. The Analytics page has separate activity, cluster, and structure routes with independent filter state. `FilterBar` and `useApiResource` provide query controls and loading, error/retry, empty, and unavailable states.
 
-Overview requests `/api/stats` first. It derives the default date window from `last_event_time` (one year back through the last stored event date), then calls `/api/events` with `min_mag=4.5`, `sort=mag_desc`, and `limit=2000`, and `/api/timeline?granularity=month` with the same dates and magnitude. Date and magnitude controls refetch the relevant data. The Earthquakes/Swarms toggle requests `/api/events` or `/api/swarms`; no whole event collection is sent to the browser.
+Overview loads `/api/stats`, then requests date- and magnitude-filtered events and timeline data. `EventMap` renders earthquake and cluster markers; marker selection can request cluster details. Swarm Explorer requests filtered cluster rows, uses `geography.js` and Natural Earth boundaries to map centroid coordinates to countries and continents, and requests member event details for a selected cluster. Its catalog supports geographic, event count, magnitude, and duration filters.
 
-`components/EventMap.jsx` renders Leaflet tiles, magnitude-sized earthquake circles, swarm circles, and diamond markers for mainshock sequences. Clicking a swarm requests `/api/swarms/{id}`; the response fills detail and overlays member events. `components/ActivityChart.jsx` is lazy-loaded after monthly data is available and uses the Plotly basic bundle and `plotTheme.js`.
+Analytics charts query the corresponding event and cluster routes. Depth and magnitude-type categories use reduced angled ticks; the duration/event-count scatter uses logarithmic axes; radius uses a numeric axis; inter-event gap bins include intervals below 0.01 hour. About / Info combines `AboutSwarms.jsx` and `WhyMongoDB.jsx`. The latter reads live index metadata from `/api/indexes` and describes the collection model, spatial/time indexes, and aggregation pipelines. Globe Lab is the only module importing `react-globe.gl`; it requests bounded event and swarm marker sets.
 
-`pages/SwarmExplorer.jsx` requests `/api/swarms` with kind/date/minimum-event/sort filters. It loads `/countries.json` through `api.js`, then `geography.js` assigns each cluster centroid to a Natural Earth country and continent. Country, continent, maximum-event-count, magnitude, and duration filters are applied locally. The catalog is shown as paginated cards. Selecting a card opens `/api/swarms/{id}`; returned events supply the regional Leaflet map, magnitude-time scatter, daily-count chart, and chronological table. `pages/Analytics.jsx` renders charts 1–7 from event analytics routes and charts 8–12 from swarm analytics routes. Activity, cluster results, and structure use separate routes and separate filter state; each date/magnitude or date/kind filter only controls its own section. All date controls are bounded to 2015-01-01 through 2025-12-31 and magnitude controls start at M 2.5. `pages/WhyMongoDB.jsx` reads actual collection indexes from `/api/indexes`; its button calls `/api/benchmark` and displays both measured cases and all three plans. `pages/AboutSwarms.jsx` explains the configured catalog and detection thresholds. `StateMessage.jsx` renders loading, error/retry, and unavailable states with context-specific messages.
+## F. Function map
 
-`pages/GlobeLab.jsx` is the only file importing `react-globe.gl`. It requests `/api/events` with a limit of 800 and `/api/swarms`, displaying up to 200 cluster centers for a 1,000 marker maximum. Its click panel sits beside the globe at desktop widths and shows earthquake or cluster fields from those records. The initial camera points toward North America; CSS brightens and softens the texture display. The page is lazy-loaded and removable with its route, nav link and dependency. `ActivityChart.jsx` plots monthly event counts as a filled line with a UTC date axis.
+- Startup: `backend.main.startup()` → `db.get_client()` → MongoDB ping → `db.ensure_indexes()`
+- Ingestion: `ingest.main()` → `_generate_date_chunks()` → `_split_and_fetch()` → `_get_usgs_count()` / `_fetch_and_upsert()` → `_parse_feature()` → `bulk_write()`
+- Detection: `detect.main()` → `detect()` → `DBSCAN.fit_predict()` → one-pass `members_by_label` grouping → `build_swarm()` → `spherical_centroid()` / `classify_magnitudes()` → replace `swarms`
+- API: `backend.main` route → corresponding `backend.db_queries` helper → MongoDB find or aggregation → JSON
+- Browser: `src/main.jsx` → `App` routes → page module → `api.js` or `useApiResource.js` → FastAPI
 
-## F. Benchmark flow
+## G. Data model and relationships
 
-The benchmark is triggered by `GET /api/benchmark` and handled by `main.benchmark()` → `db_queries.benchmark()`. It uses the same `$geoWithin` `$box` and time filter for every plan. The first case defaults to `BENCHMARK_REGIONAL_BOX`, `BENCHMARK_REGIONAL_START`, and `BENCHMARK_REGIONAL_END` from `config.py`; the second preserves the original global `BENCHMARK_BOX`, `BENCHMARK_START`, and `BENCHMARK_END`. For each case, it forces the `location_2dsphere` hint, `time_1` hint, and `{'$natural': 1}` hint. Each case/plan gets one warm-up cursor consumption followed by the requested `runs` timed cursor reads. `average_ms` and `runs_ms` measure wall time for consuming matching IDs. Separate `explain` commands with `executionStats` provide `totalDocsExamined` and `nReturned`; each case returns the matched count and its share of total catalog documents. It prints the matched count per case. A hint forces a path, not a performance result. Actual measurements require a running MongoDB database containing events.
-
-## G. Function-call mapping
-
-- Startup: `main.startup() → db.get_client() → MongoClient.admin.command('ping') → db.ensure_indexes() → db.get_db()`
-- Ingestion: `ingest.main() → _generate_date_chunks() → _split_and_fetch() → _get_usgs_count() → _build_params() → _usgs_get()`
-- Fetch/storage: `_split_and_fetch() → _fetch_and_upsert() → _usgs_get() → _parse_feature() → collection.bulk_write(UpdateOne(..., upsert=True))`
-- Detection: `detect.main() → detect() → DBSCAN.fit_predict() → build_swarm() → spherical_centroid() + classify_magnitudes() → swarms.insert_many()`
-- Events API: `main.events() → main.validate_dates()/check_box() → db_queries.events() → _event_doc()`
-- Frontend startup: `src/main.jsx → App.jsx → apiRequest('/api/health') → Overview.jsx`
-- Overview data: `Overview.jsx → apiRequest('/api/stats') → default date window → apiRequest('/api/events') + apiRequest('/api/timeline') → EventMap.jsx + ActivityChart.jsx`
-- Marker selection: `EventMap.jsx → Overview.selectMarker() → apiRequest('/api/swarms/{id}') → selected detail panel + constituent-event map overlay`
-- Analytics: each `main` analytics route → corresponding `db_queries` function → MongoDB aggregation or find
-- Swarm catalog/detail: `SwarmExplorer.jsx → apiRequest('/api/swarms') → row selection → apiRequest('/api/swarms/{id}') → regional map + charts + event table`
-- Database explainer: `AboutInfo.jsx → WhyMongoDB.jsx → apiRequest('/api/indexes')`; button → `apiRequest('/api/benchmark') → regional/global charts + per-plan execution statistics`
-- Globe: `GlobeLab.jsx → apiRequest('/api/events', limit=800) + apiRequest('/api/swarms') → normalized marker objects → react-globe.gl → selected-record panel`
-- Benchmark: `main.benchmark() → db_queries.benchmark() → (regional/global case) → warm-up + timed hinted find() cursor reads → hinted explain('executionStats') → timings, docs examined/returned, matched count`
-
-## H. Relationships and data shapes
+An event document has fields such as `{_id, time, mag, mag_type, place, depth_km, location: {type: "Point", coordinates: [lon, lat]}, url}`. A swarm document stores `{_id, start, end, duration_days, n_events, centroid, bbox, radius_km, max_mag, second_mag, mag_gap, kind, event_ids, label}`. Event records remain in `events`; swarm documents reference event IDs and the detail route resolves them.
 
 ```mermaid
 flowchart LR
   USGS[USGS FDSN API] --> ING[backend/scripts/ingest.py]
-  ING --> DB[(MongoDB events)]
-  DB --> DET[backend/scripts/detect.py]
-  DET --> SW[(MongoDB swarms)]
-  DB --> API[backend/main.py FastAPI]
-  SW --> API
-  API --> Q[backend/db_queries.py]
+  ING --> EVENTS[(MongoDB events)]
+  EVENTS --> DET[backend/scripts/detect.py]
+  DET --> SWARMS[(MongoDB swarms)]
+  EVENTS --> API[FastAPI routes]
+  SWARMS --> API
+  API --> UI[React pages]
 ```
 
 ```mermaid
@@ -95,79 +80,52 @@ flowchart TD
   A[ingest.main] --> B[_generate_date_chunks]
   B --> C[_split_and_fetch]
   C --> D[_get_usgs_count]
-  C -->|over 20000| C
   C --> E[_fetch_and_upsert]
   E --> F[_parse_feature]
-  F --> G[bulk upsert events by USGS id]
+  F --> G[bulk_write with UpdateOne upsert]
 ```
 
 ```mermaid
 flowchart TD
   A[detect.main] --> B[detect loads sorted events]
-  B --> C[convert lon lat and elapsed days to scaled 4D coordinates]
-  C --> D[DBSCAN fit_predict]
-  D --> E[build_swarm]
-  E --> F[spherical_centroid and classify_magnitudes]
-  F --> G[replace swarms collection]
+  B --> C[_event_coordinates]
+  C --> D[DBSCAN.fit_predict]
+  D --> E[members_by_label one-pass grouping]
+  E --> F[build_swarm]
+  F --> G[spherical_centroid and classify_magnitudes]
+  G --> H[replace swarms after records are built]
 ```
 
 ```mermaid
 flowchart LR
-  R[HTTP request] --> M[backend/main.py route and validation]
-  M --> H[backend/db_queries.py helper]
-  H --> DB[(MongoDB)]
-  DB --> H --> J[JSON response]
-```
-
-```mermaid
-flowchart LR
-  U[Browser] --> ROUTER[App.jsx routes]
-  ROUTER --> O[Overview]
-  ROUTER --> S[SwarmExplorer]
-  ROUTER --> A[Analytics activity / clusters / structure]
-  ROUTER --> W[AboutInfo]
-  ROUTER --> G[GlobeLab]
-  W --> I[AboutSwarms tab]
-  W --> DBINFO[WhyMongoDB tab]
-  O --> API[api.js]
-  S --> API
-  A --> API
-  W --> API
-  G --> API
-  API --> F[FastAPI routes]
-  F --> Q[db_queries.py]
-  Q --> DB[(MongoDB)]
+  BROWSER[Browser page] --> APIJS[api.js or useApiResource.js]
+  APIJS --> ROUTE[FastAPI route in backend/main.py]
+  ROUTE --> HELPER[backend/db_queries.py helper]
+  HELPER --> DB[(MongoDB)]
+  DB --> HELPER --> ROUTE --> BROWSER
 ```
 
 | Path | Responsibility |
 |---|---|
-| `backend/config.py` | MongoDB, USGS, ingestion, detection and regional/global benchmark defaults |
-| `backend/db.py` | Shared connection and required indexes |
-| `backend/main.py` | FastAPI startup, CORS, validation and endpoint routing |
+| `backend/config.py` | MongoDB, USGS, ingestion, and detection defaults |
+| `backend/db.py` | Shared MongoDB connection and indexes |
+| `backend/main.py` | FastAPI startup, validation, and routes |
 | `backend/db_queries.py` | Database query and aggregation functions |
-| `backend/scripts/ingest.py` | USGS requests, input validation and event upserts |
-| `backend/scripts/detect.py` | Coordinate scaling, clustering and swarm persistence |
-| `backend/requirements.txt` | Pinned Python dependencies |
-| `frontend/src/api.js` | Shared API URL and request/error handling |
-| `frontend/src/pages/Overview.jsx` | Overview queries, filters and selected-marker detail |
-| `frontend/src/components/EventMap.jsx` | Leaflet map and earthquake/swarm marker presentation |
-| `frontend/src/components/ActivityChart.jsx` | Lazy Plotly monthly activity chart |
-| `frontend/src/pages/SwarmExplorer.jsx` | Filtered cluster list, detail charts, regional map and event table |
-| `frontend/src/pages/Analytics.jsx` | Twelve charts across activity, cluster, and structure routes with separate filters |
-| `frontend/src/pages/AboutInfo.jsx` | About / Info tabs for the swarm guide and database explanation |
-| `frontend/src/pages/WhyMongoDB.jsx` | Live index listing and three-plan regional/global benchmark results |
-| `frontend/src/pages/GlobeLab.jsx` | Isolated lazy-loaded 3D globe and bounded markers |
-| `frontend/src/pages/AboutSwarms.jsx` | Human-readable catalog and clustering method guide tab |
-| `frontend/src/catalog.js` | UI catalog bounds and mirrored clustering defaults |
-| `frontend/src/geography.js` | Country/continent lookup for swarm centroid coordinates |
-| `frontend/public/countries.json` | Public-domain Natural Earth 1:110m country boundaries, fetched on the Swarm Explorer page |
-| `frontend/src/components/PlotlyChart.jsx` | Shared Plotly React wrapper |
-| `frontend/src/components/ChartPanel.jsx` | Analytics chart title, description and states |
-| `frontend/src/components/FilterBar.jsx` | Shared date, magnitude, cluster kind and sort inputs |
-| `frontend/src/hooks/useApiResource.js` | Abortable resource loading with retry/error state |
-| `frontend/src/plotTheme.js` | Shared Plotly colors, fonts and layout defaults |
-| `frontend/src/styles.css` | Design tokens, responsive layout and state styling |
-
-Frontend relationships: `App.jsx` routes to the page modules; Overview composes `EventMap` and `ActivityChart`; Swarm Explorer composes `RegionalSwarmMap`, `ChartPanel`, `PlotlyChart`, and `FilterBar`, with country lookup data from `geography.js`; Analytics composes `ChartPanel`, `PlotlyChart`, and `FilterBar` on three routes with separate filter state; AboutInfo switches between WhyMongoDB (which composes `PlotlyChart`) and AboutSwarms (which reads display thresholds from `catalog.js`); Globe Lab uses `react-globe.gl` only inside its own page module. Data requests flow through `api.js` directly or through `useApiResource.js`.
-
-Key event shape: `{_id, time, mag, mag_type, place, depth_km, location: {type: "Point", coordinates: [lon, lat]}, url}`. Key swarm shape: `{_id, start, end, duration_days, n_events, centroid, bbox, radius_km, max_mag, second_mag, mag_gap, kind, event_ids, label}`. `GET /api/events` maps coordinates to `lat` and `lon`; `GET /api/swarms` omits `event_ids`; the detail route includes `events` alongside the stored swarm fields.
+| `backend/scripts/ingest.py` | USGS requests, validation, and event upserts |
+| `backend/scripts/detect.py` | Coordinate scaling, clustering, classification, and persistence |
+| `backend/tests/` | API, ingestion, database-query, and detection tests |
+| `frontend/src/main.jsx` | React entry point and router mount |
+| `frontend/src/App.jsx` | Navigation, routes, and page loading |
+| `frontend/src/api.js` | Shared API and static-asset request handling |
+| `frontend/src/components/EventMap.jsx` | Overview event and cluster map |
+| `frontend/src/components/ActivityChart.jsx` | Overview monthly activity chart |
+| `frontend/src/components/FilterBar.jsx` | Date, magnitude, kind, and sort controls |
+| `frontend/src/components/ChartPanel.jsx` | Chart headings and request states |
+| `frontend/src/components/PlotlyChart.jsx` | Plotly React wrapper |
+| `frontend/src/pages/Analytics.jsx` | Activity, cluster, and structure charts |
+| `frontend/src/pages/SwarmExplorer.jsx` | Cluster filters, details, map, and event charts |
+| `frontend/src/pages/AboutInfo.jsx` | Combined About / Info sections |
+| `frontend/src/pages/AboutSwarms.jsx` | Catalog, classification, and coverage guide |
+| `frontend/src/pages/WhyMongoDB.jsx` | Collection explanation and live index listing |
+| `frontend/src/pages/GlobeLab.jsx` | Isolated 3D globe view |
+| `frontend/src/geography.js` and `frontend/public/countries.json` | Country/continent assignment for cluster centroids |

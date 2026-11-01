@@ -3,15 +3,9 @@
 from datetime import datetime, timedelta, timezone
 import math
 
-try:  # Support both package imports from the project root and direct backend execution.
-    from .config import (BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_REGIONAL_BOX,
-                         BENCHMARK_REGIONAL_END, BENCHMARK_REGIONAL_START,
-                         BENCHMARK_RUNS, BENCHMARK_START)
+try:  # Support package imports from the root and direct execution from backend/.
     from .db import get_db
 except ImportError:
-    from config import (BENCHMARK_BOX, BENCHMARK_END, BENCHMARK_REGIONAL_BOX,
-                        BENCHMARK_REGIONAL_END, BENCHMARK_REGIONAL_START,
-                        BENCHMARK_RUNS, BENCHMARK_START)
     from db import get_db
 
 
@@ -37,10 +31,18 @@ def _date_range(start, end):
 
 
 def _event_doc(doc):
-    loc = doc.get("location", {}).get("coordinates", [None, None])
-    return {"id": doc["_id"], "time": doc.get("time"), "mag": doc.get("mag"),
-            "mag_type": doc.get("mag_type"), "place": doc.get("place"),
-            "depth_km": doc.get("depth_km"), "lon": loc[0], "lat": loc[1], "url": doc.get("url")}
+    location = doc.get("location", {}).get("coordinates", [None, None])
+    return {
+        "id": doc["_id"],
+        "time": doc.get("time"),
+        "mag": doc.get("mag"),
+        "mag_type": doc.get("mag_type"),
+        "place": doc.get("place"),
+        "depth_km": doc.get("depth_km"),
+        "lon": location[0],
+        "lat": location[1],
+        "url": doc.get("url"),
+    }
 
 
 def health():
@@ -52,230 +54,419 @@ def health():
 
 
 def indexes():
-    """Read index metadata directly from MongoDB for the database explainer."""
+    """Read index metadata directly from MongoDB for the database guide."""
     db = get_db()
     collections = []
     for collection_name in ("events", "swarms"):
         definitions = db[collection_name].index_information()
         collection_indexes = []
         for name, definition in definitions.items():
+            keys = [
+                {"field": field, "direction": direction}
+                for field, direction in definition.get("key", [])
+            ]
             collection_indexes.append({
                 "name": name,
-                "keys": [{"field": field, "direction": direction} for field, direction in definition.get("key", [])],
+                "keys": keys,
                 "unique": definition.get("unique", False),
             })
-        collections.append({"collection": collection_name, "indexes": collection_indexes})
+        collections.append({
+            "collection": collection_name,
+            "indexes": collection_indexes,
+        })
     return {"collections": collections}
 
 
 def stats():
     db = get_db()
-    times = list(db.events.aggregate([{"$group": {"_id": None, "first": {"$min": "$time"}, "last": {"$max": "$time"}}}]))
-    return {"total_events": db.events.count_documents({}),
-            "first_event_time": times[0]["first"] if times else None,
-            "last_event_time": times[0]["last"] if times else None,
-            "swarm_count": db.swarms.count_documents({"kind": "swarm"}),
-            "mainshock_sequence_count": db.swarms.count_documents({"kind": "mainshock_sequence"})}
+    # Read the event time bounds in MongoDB instead of loading all events.
+    time_summary = list(db.events.aggregate([
+        {
+            "$group": {
+                "_id": None,
+                "first": {"$min": "$time"},
+                "last": {"$max": "$time"},
+            }
+        }
+    ]))
+    first_time = time_summary[0]["first"] if time_summary else None
+    last_time = time_summary[0]["last"] if time_summary else None
+    return {
+        "total_events": db.events.count_documents({}),
+        "first_event_time": first_time,
+        "last_event_time": last_time,
+        "swarm_count": db.swarms.count_documents({"kind": "swarm"}),
+        "mainshock_sequence_count": db.swarms.count_documents({"kind": "mainshock_sequence"}),
+    }
 
 
-def events(min_lon=None, min_lat=None, max_lon=None, max_lat=None, start=None, end=None, min_mag=None, limit=2000, sort="mag_desc"):
+def events(
+    min_lon=None,
+    min_lat=None,
+    max_lon=None,
+    max_lat=None,
+    start=None,
+    end=None,
+    min_mag=None,
+    limit=2000,
+    sort="mag_desc",
+):
     query = {}
-    if all(v is not None for v in (min_lon, min_lat, max_lon, max_lat)):
-        query["location"] = {"$geoWithin": {"$box": [[min_lon, min_lat], [max_lon, max_lat]]}}
+    coordinates = (min_lon, min_lat, max_lon, max_lat)
+    if all(value is not None for value in coordinates):
+        query["location"] = {
+            "$geoWithin": {
+                "$box": [[min_lon, min_lat], [max_lon, max_lat]],
+            }
+        }
     if start or end:
         query["time"] = _date_range(start, end)
-    if min_mag is not None: query["mag"] = {"$gte": min_mag}
-    order = [("mag", -1), ("time", -1)] if sort == "mag_desc" else [("time", -1)]
-    rows = [_event_doc(x) for x in get_db().events.find(query).sort(order).limit(limit)]
+    if min_mag is not None:
+        query["mag"] = {"$gte": min_mag}
+
+    if sort == "mag_desc":
+        order = [("mag", -1), ("time", -1)]
+    else:
+        order = [("time", -1)]
+
+    rows = [
+        _event_doc(document)
+        for document in get_db().events.find(query).sort(order).limit(limit)
+    ]
     return {"count": len(rows), "events": rows}
 
 
 def swarms(kind=None, min_events=None, start=None, end=None, sort="start_desc"):
-    q = {}
-    if kind: q["kind"] = kind
-    if min_events is not None: q["n_events"] = {"$gte": min_events}
+    query = {}
+    if kind:
+        query["kind"] = kind
+    if min_events is not None:
+        query["n_events"] = {"$gte": min_events}
     if start or end:
-        q["start"] = _date_range(start, end)
+        query["start"] = _date_range(start, end)
+
     direction = -1 if sort == "start_desc" else 1
-    return list(get_db().swarms.find(q, {"event_ids": 0}).sort("start", direction))
+    return list(
+        get_db().swarms.find(query, {"event_ids": 0}).sort("start", direction)
+    )
 
 
 def swarm_detail(swarm_id):
-    swarm = get_db().swarms.find_one({"_id": swarm_id})
+    db = get_db()
+    swarm = db.swarms.find_one({"_id": swarm_id})
     if not swarm:
         return None
-    swarm["events"] = [_event_doc(e) for e in get_db().events.find({"_id": {"$in": swarm.get("event_ids", [])}}).sort("time", 1)]
+
+    member_query = {"_id": {"$in": swarm.get("event_ids", [])}}
+    member_events = db.events.find(member_query).sort("time", 1)
+    swarm["events"] = [_event_doc(event) for event in member_events]
     return swarm
 
 
 def _date_match(start, end, min_mag=None, swarm=False, kind=None):
-    q = {}
-    field = "start" if swarm else "time"
+    query = {}
+    date_field = "start" if swarm else "time"
     if start or end:
-        q[field] = _date_range(start, end)
-    if min_mag is not None: q["mag"] = {"$gte": min_mag}
-    if kind: q["kind"] = kind
-    return q
+        query[date_field] = _date_range(start, end)
+    if min_mag is not None:
+        query["mag"] = {"$gte": min_mag}
+    if kind:
+        query["kind"] = kind
+    return query
 
 
 def timeline(granularity, start=None, end=None, min_mag=None):
-    fmt = "%Y" if granularity == "year" else "%Y-%m"
-    return list(get_db().events.aggregate([
+    date_format = "%Y" if granularity == "year" else "%Y-%m"
+    # Group matching event timestamps into UTC calendar periods.
+    pipeline = [
         {"$match": _date_match(start, end, min_mag)},
-        {"$group": {"_id": {"$dateToString": {"format": fmt, "date": "$time", "timezone": "UTC"}}, "count": {"$sum": 1}}},
-        {"$sort": {"_id": 1}}, {"$project": {"_id": 0, "period": "$_id", "count": 1}}]))
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {
+                        "format": date_format,
+                        "date": "$time",
+                        "timezone": "UTC",
+                    }
+                },
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id": 1}},
+        {"$project": {"_id": 0, "period": "$_id", "count": 1}},
+    ]
+    return list(get_db().events.aggregate(pipeline))
 
 
 def magnitude_distribution(start=None, end=None, min_mag=None):
-    return list(get_db().events.aggregate([
+    # Floor magnitudes to half-unit buckets, then expose their bounds.
+    pipeline = [
         {"$match": _date_match(start, end, min_mag)},
-        {"$group": {"_id": {"$multiply": [{"$floor": {"$multiply": ["$mag", 2]}}, 0.5]}, "count": {"$sum": 1}}},
+        {
+            "$group": {
+                "_id": {
+                    "$multiply": [
+                        {"$floor": {"$multiply": ["$mag", 2]}},
+                        0.5,
+                    ]
+                },
+                "count": {"$sum": 1},
+            }
+        },
         {"$sort": {"_id": 1}},
-        {"$project": {"_id": 0, "bin_start": "$_id", "bin_end": {"$add": ["$_id", 0.5]}, "count": 1}}]))
+        {
+            "$project": {
+                "_id": 0,
+                "bin_start": "$_id",
+                "bin_end": {"$add": ["$_id", 0.5]},
+                "count": 1,
+            }
+        },
+    ]
+    return list(get_db().events.aggregate(pipeline))
 
 
 def depth_distribution(start=None, end=None, min_mag=None):
-    q = _date_match(start, end, min_mag)
-    pipeline = [{"$match": q}, {"$facet": {
-        "bins": [{"$match": {"depth_km": {"$ne": None}}}, {"$group": {"_id": {"$multiply": [{"$floor": {"$divide": ["$depth_km", 10]}}, 10]}, "count": {"$sum": 1}}}, {"$sort": {"_id": 1}}, {"$project": {"_id": 0, "bin_start": "$_id", "bin_end": {"$add": ["$_id", 10]}, "count": 1}}],
-        "excluded": [{"$match": {"depth_km": None}}, {"$count": "count"}]}}]
-    res = list(get_db().events.aggregate(pipeline))[0]
-    return {"bins": res["bins"], "excluded_null_depth": res["excluded"][0]["count"] if res["excluded"] else 0}
+    # The facet keeps null-depth totals alongside the actual depth bins.
+    pipeline = [
+        {"$match": _date_match(start, end, min_mag)},
+        {
+            "$facet": {
+                "bins": [
+                    {"$match": {"depth_km": {"$ne": None}}},
+                    {
+                        "$group": {
+                            "_id": {
+                                "$multiply": [
+                                    {"$floor": {"$divide": ["$depth_km", 10]}},
+                                    10,
+                                ]
+                            },
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$sort": {"_id": 1}},
+                    {
+                        "$project": {
+                            "_id": 0,
+                            "bin_start": "$_id",
+                            "bin_end": {"$add": ["$_id", 10]},
+                            "count": 1,
+                        }
+                    },
+                ],
+                "excluded": [
+                    {"$match": {"depth_km": None}},
+                    {"$count": "count"},
+                ],
+            }
+        },
+    ]
+    result = list(get_db().events.aggregate(pipeline))[0]
+    excluded = result["excluded"][0]["count"] if result["excluded"] else 0
+    return {"bins": result["bins"], "excluded_null_depth": excluded}
 
 
 def magnitude_depth(start=None, end=None, min_mag=None):
-    q = _date_match(start, end, min_mag); q["depth_km"] = {"$ne": None}
-    docs = list(get_db().events.aggregate([{"$match": q}, {"$sample": {"size": 5000}}, {"$project": {"_id": 0, "mag": 1, "depth_km": 1}}]))
-    return {"sample_size": len(docs), "points": docs}
+    query = _date_match(start, end, min_mag)
+    query["depth_km"] = {"$ne": None}
+    # Sample a bounded number of records for the scatter plot.
+    pipeline = [
+        {"$match": query},
+        {"$sample": {"size": 5000}},
+        {"$project": {"_id": 0, "mag": 1, "depth_km": 1}},
+    ]
+    points = list(get_db().events.aggregate(pipeline))
+    return {"sample_size": len(points), "points": points}
 
 
 def regions(start=None, end=None, min_mag=None):
-    return list(get_db().events.aggregate([
-        {"$match": {**_date_match(start, end, min_mag), "place": {"$type": "string"}}},
-        {"$project": {"region": {"$let": {"vars": {"parts": {"$split": ["$place", ","]}}, "in": {"$trim": {"input": {"$arrayElemAt": ["$$parts", -1]}}}}}, "mag": 1}},
-        {"$group": {"_id": "$region", "count": {"$sum": 1}, "avg_mag": {"$avg": "$mag"}}}, {"$sort": {"count": -1}}, {"$limit": 15},
-        {"$project": {"_id": 0, "region": "$_id", "count": 1, "avg_mag": 1}}]))
+    # Region labels use the suffix of USGS place text after its final comma.
+    pipeline = [
+        {
+            "$match": {
+                **_date_match(start, end, min_mag),
+                "place": {"$type": "string"},
+            }
+        },
+        {
+            "$project": {
+                "region": {
+                    "$let": {
+                        "vars": {"parts": {"$split": ["$place", ","]}},
+                        "in": {
+                            "$trim": {
+                                "input": {"$arrayElemAt": ["$$parts", -1]}
+                            }
+                        },
+                    }
+                },
+                "mag": 1,
+            }
+        },
+        {
+            "$group": {
+                "_id": "$region",
+                "count": {"$sum": 1},
+                "avg_mag": {"$avg": "$mag"},
+            }
+        },
+        {"$sort": {"count": -1}},
+        {"$limit": 15},
+        {
+            "$project": {
+                "_id": 0,
+                "region": "$_id",
+                "count": 1,
+                "avg_mag": 1,
+            }
+        },
+    ]
+    return list(get_db().events.aggregate(pipeline))
 
 
 def magnitude_types(start=None, end=None, min_mag=None):
-    return list(get_db().events.aggregate([
-        {"$match": _date_match(start, end, min_mag)}, {"$group": {"_id": {"$ifNull": ["$mag_type", "Not available"]}, "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}, {"$project": {"_id": 0, "mag_type": "$_id", "count": 1}}]))
+    # Keep missing magnitude-type values visible as a named category.
+    pipeline = [
+        {"$match": _date_match(start, end, min_mag)},
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$mag_type", "Not available"]},
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"count": -1}},
+        {"$project": {"_id": 0, "mag_type": "$_id", "count": 1}},
+    ]
+    return list(get_db().events.aggregate(pipeline))
 
 
 def swarm_summary(start=None, end=None, kind=None):
-    q = _date_match(start, end, swarm=True, kind=kind)
-    return {"by_kind": list(get_db().swarms.aggregate([
-        {"$match": q}, {"$group": {"_id": "$kind", "count": {"$sum": 1}, "avg_duration_days": {"$avg": "$duration_days"}, "avg_n_events": {"$avg": "$n_events"}}},
-        {"$project": {"_id": 0, "kind": "$_id", "count": 1, "avg_duration_days": 1, "avg_n_events": 1}}]))}
+    # Summarize cluster counts and means by stored classification.
+    pipeline = [
+        {"$match": _date_match(start, end, swarm=True, kind=kind)},
+        {
+            "$group": {
+                "_id": "$kind",
+                "count": {"$sum": 1},
+                "avg_duration_days": {"$avg": "$duration_days"},
+                "avg_n_events": {"$avg": "$n_events"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "kind": "$_id",
+                "count": 1,
+                "avg_duration_days": 1,
+                "avg_n_events": 1,
+            }
+        },
+    ]
+    return {"by_kind": list(get_db().swarms.aggregate(pipeline))}
 
 
 def swarm_scatter(start=None, end=None, kind=None):
-    q = _date_match(start, end, swarm=True, kind=kind)
-    return list(get_db().swarms.find(q, {"_id": 1, "kind": 1, "duration_days": 1, "n_events": 1, "max_mag": 1}))
+    query = _date_match(start, end, swarm=True, kind=kind)
+    projection = {
+        "_id": 1,
+        "kind": 1,
+        "duration_days": 1,
+        "n_events": 1,
+        "max_mag": 1,
+    }
+    return list(get_db().swarms.find(query, projection))
 
 
 def swarm_timeline(granularity, start=None, end=None, kind=None):
-    fmt = "%Y" if granularity == "year" else "%Y-%m"
-    return list(get_db().swarms.aggregate([
+    date_format = "%Y" if granularity == "year" else "%Y-%m"
+    # Group cluster start dates by period and classification.
+    pipeline = [
         {"$match": _date_match(start, end, swarm=True, kind=kind)},
-        {"$group": {"_id": {"period": {"$dateToString": {"format": fmt, "date": "$start", "timezone": "UTC"}}, "kind": "$kind"}, "count": {"$sum": 1}}},
-        {"$sort": {"_id.period": 1}}, {"$project": {"_id": 0, "period": "$_id.period", "kind": "$_id.kind", "count": 1}}]))
+        {
+            "$group": {
+                "_id": {
+                    "period": {
+                        "$dateToString": {
+                            "format": date_format,
+                            "date": "$start",
+                            "timezone": "UTC",
+                        }
+                    },
+                    "kind": "$kind",
+                },
+                "count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id.period": 1}},
+        {
+            "$project": {
+                "_id": 0,
+                "period": "$_id.period",
+                "kind": "$_id.kind",
+                "count": 1,
+            }
+        },
+    ]
+    return list(get_db().swarms.aggregate(pipeline))
 
 
 def swarm_radius(start=None, end=None, kind=None):
-    docs = list(get_db().swarms.find(_date_match(start, end, swarm=True, kind=kind), {"radius_km": 1}))
+    query = _date_match(start, end, swarm=True, kind=kind)
+    documents = get_db().swarms.find(query, {"radius_km": 1})
     counts = {}
-    for d in docs:
-        if d.get("radius_km") is not None:
-            b = math.floor(d["radius_km"] / 10) * 10
-            counts[b] = counts.get(b, 0) + 1
-    return [{"bin_start": b, "bin_end": b + 10, "count": counts[b]} for b in sorted(counts)]
+    for document in documents:
+        radius = document.get("radius_km")
+        if radius is None:
+            continue
+        bin_start = math.floor(radius / 10) * 10
+        counts[bin_start] = counts.get(bin_start, 0) + 1
+
+    return [
+        {"bin_start": start, "bin_end": start + 10, "count": counts[start]}
+        for start in sorted(counts)
+    ]
 
 
 def inter_event_times(start=None, end=None, kind=None):
     query = _date_match(start, end, swarm=True, kind=kind)
-    bins = [0.01, 0.1, 1, 10, 100, 1000, 10000, 1000000]
-    counts = [0] * (len(bins) - 1)
-    for swarm in get_db().swarms.find(query, {"event_ids": 1}):
-        times = [e["time"] for e in get_db().events.find({"_id": {"$in": swarm.get("event_ids", [])}}, {"time": 1}).sort("time", 1)]
-        for a, b in zip(times, times[1:]):
-            gap = (b - a).total_seconds() / 3600
-            for i in range(len(counts)):
-                if bins[i] <= gap < bins[i + 1]: counts[i] += 1; break
-    return [{"bin_start_hours": bins[i], "bin_end_hours": bins[i + 1], "count": counts[i]} for i in range(len(counts))]
+    bins = [
+        {"start": 0.0, "end": 0.01, "label": "<0.01"},
+        {"start": 0.01, "end": 0.1, "label": "0.01–0.1"},
+        {"start": 0.1, "end": 1.0, "label": "0.1–1"},
+        {"start": 1.0, "end": 10.0, "label": "1–10"},
+        {"start": 10.0, "end": 100.0, "label": "10–100"},
+        {"start": 100.0, "end": 1000.0, "label": "100–1,000"},
+        {"start": 1000.0, "end": 10000.0, "label": "1,000–10,000"},
+        {"start": 10000.0, "end": None, "label": "10,000+"},
+    ]
+    counts = [0] * len(bins)
+    swarms_query = get_db().swarms.find(query, {"event_ids": 1})
 
+    for swarm in swarms_query:
+        event_query = {"_id": {"$in": swarm.get("event_ids", [])}}
+        event_projection = {"time": 1}
+        event_cursor = get_db().events.find(event_query, event_projection).sort("time", 1)
+        times = [event["time"] for event in event_cursor]
 
-def benchmark(min_lon=None, min_lat=None, max_lon=None, max_lat=None, start=None, end=None, runs=BENCHMARK_RUNS):
-    """Measure three MongoDB access paths against focused and global filters.
+        for earlier, later in zip(times, times[1:]):
+            gap_hours = (later - earlier).total_seconds() / 3600
+            for index, time_bin in enumerate(bins):
+                lower_bound = time_bin["start"]
+                upper_bound = time_bin["end"]
+                is_in_bin = gap_hours >= lower_bound
+                if upper_bound is not None:
+                    is_in_bin = is_in_bin and gap_hours < upper_bound
+                if is_in_bin:
+                    counts[index] += 1
+                    break
 
-    Timings include consuming each cursor, so they represent a complete query
-    read on this client. Explain statistics are collected separately from the
-    same filter, projection, and hint for each plan.
-    """
-    from time import perf_counter
-
-    if runs < 1:
-        raise ValueError("runs must be at least 1")
-
-    db = get_db()
-    regional_box = [min_lon, min_lat, max_lon, max_lat] if min_lon is not None else BENCHMARK_REGIONAL_BOX
-    regional_start = start or BENCHMARK_REGIONAL_START
-    regional_end = end or BENCHMARK_REGIONAL_END
-    total_events = db.events.count_documents({})
-
-    cases = (
-        ("regional", "Small regional sample", regional_box, regional_start, regional_end),
-        ("global", "Original global query", BENCHMARK_BOX, BENCHMARK_START, BENCHMARK_END),
-    )
-    plans = (
-        ("2dsphere", "location_2dsphere"),
-        ("time_index", "time_1"),
-        ("collection_scan", {"$natural": 1}),
-    )
-    projection = {"_id": 1}
-    output = {"total_events": total_events, "runs": runs, "cases": {}}
-
-    for case_key, label, box, case_start, case_end in cases:
-        query = {
-            "location": {"$geoWithin": {"$box": [[box[0], box[1]], [box[2], box[3]]] }},
-            "time": _date_range(case_start, case_end),
+    return [
+        {
+            "bin_start_hours": time_bin["start"],
+            "bin_end_hours": time_bin["end"],
+            "label": time_bin["label"],
+            "count": counts[index],
         }
-        case_result = {
-            "label": label,
-            "box": box,
-            "start": case_start,
-            "end": case_end,
-            "plans": {},
-        }
-        for plan_key, hint in plans:
-            def consume_query():
-                return sum(1 for _ in db.events.find(query, projection).hint(hint))
-
-            # Warm each case/plan once, then time the configured number of full cursor reads.
-            consume_query()
-            timings = []
-            for _ in range(runs):
-                started = perf_counter()
-                consume_query()
-                timings.append((perf_counter() - started) * 1000)
-
-            explain = db.command(
-                "explain",
-                {"find": "events", "filter": query, "projection": projection, "hint": hint},
-                verbosity="executionStats",
-            )
-            stats = explain["executionStats"]
-            case_result["plans"][plan_key] = {
-                "average_ms": sum(timings) / len(timings),
-                "runs_ms": timings,
-                "docs_examined": stats["totalDocsExamined"],
-                "docs_returned": stats["nReturned"],
-            }
-
-        case_result["returned_count"] = case_result["plans"]["2dsphere"]["docs_returned"]
-        case_result["catalog_percent"] = (case_result["returned_count"] / total_events * 100) if total_events else None
-        output["cases"][case_key] = case_result
-        print(f"Benchmark {label}: {case_result['returned_count']} returned")
-
-    return output
+        for index, time_bin in enumerate(bins)
+    ]

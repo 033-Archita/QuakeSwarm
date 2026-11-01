@@ -7,6 +7,8 @@ export const CLUSTER_SPACE_KM = 15
 export const CLUSTER_TIME_DAYS = 7
 export const CLUSTER_MIN_EVENTS = 20
 export const CLUSTER_MAG_GAP_THRESHOLD = 1.2
+export const EARLY_MAINSHOCK_MAGNITUDE = 6.0
+export const EARLY_MAINSHOCK_FRACTION = 0.25
 
 export function clampCatalogDate(value) {
   if (!value) return CATALOG_START
